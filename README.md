@@ -2,7 +2,7 @@
 
 SDK en TypeScript para interactuar con los Web Services de **ARCA** (ex AFIP) — Facturación Electrónica Argentina.
 
-Soporta **todos los tipos de comprobante** de WSFEv1: Facturas, Notas de Débito/Crédito, Recibos (A, B, C, E, M) y Facturas de Crédito Electrónica MiPyME (FCE).
+Soporta **todos los tipos de comprobante** de WSFEv1 y WSFEX: Facturas, Notas de Débito/Crédito, Recibos (A, B, C, E, M), Facturas de Crédito Electrónica MiPyME (FCE) y Facturas de Exportación.
 
 ## Instalación
 
@@ -60,6 +60,11 @@ const arca = new Arca({
   production: false,           // Default: false (testing/homologación)
   tokenTTLMinutes: 720,        // Default: 720 (12 horas)
   requestTimeoutMs: 30_000,    // Default: 30000 (30 segundos)
+  retries: 1,                  // Default: 1 (reintentos en errores transitorios)
+  retryDelayMs: 1_000,         // Default: 1000 (backoff exponencial: 1s, 2s, ...)
+  onEvent: (e) => {            // Opcional: callback para logging/debugging
+    console.log(e.type, e);
+  },
 });
 ```
 
@@ -174,6 +179,46 @@ const result = await arca.facturar({
 });
 ```
 
+### Factura de exportación (WSFEX)
+
+```typescript
+const nextId = (await arca.ultimoIdExpo()) + 1;
+const nextNum = await arca.siguienteComprobanteExpo(1, CbteTipo.FACTURA_E);
+
+const result = await arca.crearFacturaExportacion({
+  Id: nextId,
+  Cbte_Tipo: CbteTipo.FACTURA_E,
+  Fecha_cbte: Arca.formatDate(new Date()),
+  Punto_vta: 1,
+  Cbte_nro: nextNum,
+  Tipo_expo: 1, // 1=Bienes, 2=Servicios, 4=Otros
+  Permiso_existente: "N",
+  Dst_cmp: 203, // País destino (203 = Estados Unidos)
+  Cliente: "ACME Corp",
+  Cuit_pais_cliente: 50000000016,
+  Domicilio_cliente: "123 Main St, New York",
+  Id_impositivo: "12-3456789",
+  Moneda_Id: "DOL",
+  Moneda_ctz: 1200,
+  Idioma_cbte: 2, // 1=Español, 2=Inglés, 3=Portugués
+  Forma_pago: "Wire Transfer",
+  Incoterms: "FOB",
+  Items: [{
+    Pro_codigo: "SKU001",
+    Pro_ds: "Widget",
+    Pro_qty: 100,
+    Pro_umed: 7,
+    Pro_precio_uni: 10,
+    Pro_bonificacion: 0,
+    Pro_total_item: 1000,
+  }],
+});
+
+if (result.FEXResultAuth?.Resultado === "A") {
+  console.log(`CAE: ${result.FEXResultAuth.Cae}`);
+}
+```
+
 ### Previsualizar totales sin enviar
 
 ```typescript
@@ -183,6 +228,25 @@ const { importes, iva } = Arca.calcularTotales([
 ]);
 console.log(importes);
 // { total: 1762.5, neto: 1500, iva: 262.5, exento: 0, noGravado: 0, tributos: 0 }
+```
+
+### QR para factura impresa
+
+```typescript
+const url = Arca.generateQRUrl({
+  fecha: "2026-03-28",
+  cuit: 20123456789,
+  ptoVta: 1,
+  tipoCmp: CbteTipo.FACTURA_B,
+  nroCmp: 150,
+  importe: 121,
+  moneda: "PES",
+  ctz: 1,
+  tipoDocRec: DocTipo.CONSUMIDOR_FINAL,
+  nroDocRec: 0,
+  codAut: 73429843294823, // CAE
+});
+// → "https://www.afip.gob.ar/fe/qr/?p=<base64>"
 ```
 
 ### Factura en moneda extranjera
@@ -200,6 +264,55 @@ const result = await arca.facturar({
   cotizacion: cotiz.MonCotiz,
 });
 ```
+
+## Retry automático
+
+El SDK reintenta automáticamente en errores transitorios (timeout, HTTP 5xx, errores de red). No reintenta en errores de negocio (4xx, errores de ARCA).
+
+- **Default**: 1 reintento con backoff exponencial (1s, 2s, ...)
+- **Configurable**: `retries: 0` para desactivar, `retries: 3` para más intentos
+
+```typescript
+const arca = new Arca({
+  ...config,
+  retries: 2,         // 2 reintentos (3 intentos totales)
+  retryDelayMs: 2000, // empezar con 2s → 4s → 8s
+});
+```
+
+## Eventos / Logging
+
+El SDK emite eventos para debugging y monitoreo sin forzar un logger específico.
+
+```typescript
+// Opción 1: callback en config
+const arca = new Arca({
+  ...config,
+  onEvent: (e) => console.log(`[${e.type}]`, e),
+});
+
+// Opción 2: suscripción por tipo de evento
+arca.on("request:end", (e) => {
+  if (e.type === "request:end") {
+    metrics.histogram("arca.request.duration", e.durationMs);
+  }
+});
+
+arca.on("request:retry", (e) => {
+  if (e.type === "request:retry") {
+    logger.warn(`Retry #${e.attempt} for ${e.method}: ${e.error}`);
+  }
+});
+```
+
+| Evento | Cuándo | Datos |
+| --- | --- | --- |
+| `auth:login` | Nuevo token obtenido | `service`, `durationMs` |
+| `auth:cache-hit` | Token cacheado reutilizado | `service` |
+| `request:start` | Antes de una llamada SOAP | `method`, `endpoint` |
+| `request:end` | Llamada SOAP completada | `method`, `durationMs` |
+| `request:retry` | Reintentando tras error | `method`, `attempt`, `delayMs`, `error` |
+| `request:error` | Llamada SOAP falló | `method`, `error` |
 
 ## Manejo de errores
 
@@ -223,7 +336,7 @@ try {
   }
 
   if (e instanceof ArcaWSFEError) {
-    // Error de WSFE con códigos de ARCA
+    // Error de WSFE/WSFEX con códigos de ARCA
     for (const err of e.errors) {
       console.error(`[${err.code}] ${err.msg}`);
     }
@@ -239,7 +352,7 @@ try {
 | Clase | Cuándo se lanza |
 | --- | --- |
 | `ArcaAuthError` | Falla en login WSAA, respuesta inesperada, token/sign inválidos |
-| `ArcaWSFEError` | Error devuelto por WSFE (campos inválidos, CUIT no autorizado, etc.). Contiene `errors: { code, msg }[]` |
+| `ArcaWSFEError` | Error devuelto por WSFE/WSFEX (campos inválidos, CUIT no autorizado, etc.). Contiene `errors: { code, msg }[]` |
 | `ArcaSoapError` | Error HTTP, timeout, SOAP Fault. Contiene `statusCode?: number` |
 | `ArcaError` | Clase base para todos los errores del SDK |
 
@@ -284,6 +397,9 @@ const maxRegs = await arca.getCantMaxRegistros();
 | `production` | `boolean` | `false` | Entorno de producción |
 | `tokenTTLMinutes` | `number` | `720` | TTL del token en minutos |
 | `requestTimeoutMs` | `number` | `30000` | Timeout HTTP en milisegundos |
+| `retries` | `number` | `1` | Reintentos en errores transitorios |
+| `retryDelayMs` | `number` | `1000` | Delay inicial entre reintentos (exponencial) |
+| `onEvent` | `function` | — | Callback para eventos del SDK |
 
 ### Facturación — API simplificada
 
@@ -305,7 +421,26 @@ Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `i
 | `siguienteComprobante(ptoVta, cbteTipo)` | Siguiente número (último + 1) |
 | `consultarComprobante(cbteTipo, ptoVta, cbteNro)` | Consulta un comprobante existente |
 
-### Parámetros
+### Exportación (WSFEX)
+
+| Método | Descripción |
+| --- | --- |
+| `crearFacturaExportacion(invoice)` | Autoriza un comprobante de exportación |
+| `ultimoComprobanteExpo(ptoVta, cbteTipo)` | Último número autorizado (WSFEX) |
+| `siguienteComprobanteExpo(ptoVta, cbteTipo)` | Siguiente número (WSFEX) |
+| `ultimoIdExpo()` | Último ID de request WSFEX |
+| `consultarComprobanteExpo(cbteTipo, ptoVta, cbteNro)` | Consulta comprobante de exportación |
+| `serverStatusExpo()` | Estado de los servidores WSFEX |
+| `getTiposCbteExpo()` | Tipos de comprobante de exportación |
+| `getMonedasExpo()` | Monedas (WSFEX) |
+| `getPaisesExpo()` | Países destino |
+| `getIdiomasExpo()` | Idiomas disponibles |
+| `getIncotermsExpo()` | Incoterms |
+| `getUMedExpo()` | Unidades de medida |
+| `getTiposExpo()` | Tipos de exportación |
+| `getCuitsPaisExpo()` | CUITs de países |
+
+### Parámetros WSFE
 
 | Método | Descripción |
 | --- | --- |
@@ -321,11 +456,19 @@ Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `i
 | `getCotizacion(monedaId)` | Cotización de una moneda |
 | `getCantMaxRegistros()` | Máx registros por request |
 
+### Eventos
+
+| Método | Descripción |
+| --- | --- |
+| `on(event, handler)` | Suscribirse a un tipo de evento |
+| `off(event, handler)` | Desuscribirse de un evento |
+
 ### Utilidades estáticas
 
 | Método | Descripción |
 | --- | --- |
 | `Arca.calcularTotales(items, opts?)` | Calcula importes e IVA sin enviar a ARCA |
+| `Arca.generateQRUrl(input)` | Genera la URL del QR oficial de AFIP |
 | `Arca.extractCAE(result)` | Extrae CAE del resultado raw |
 | `Arca.formatDate(date)` | Formatea `Date` a `YYYYMMDD` (timezone Argentina) |
 
@@ -378,10 +521,10 @@ Tambien se incluyen tipos especiales: `COMPRA_BIENES_USADOS` (49), `CTA_VTA_LIQ_
 
 ## Entornos
 
-| Entorno | WSAA | WSFE |
-| --- | --- | --- |
-| Testing | `wsaahomo.afip.gov.ar` | `wswhomo.afip.gov.ar` |
-| Producción | `wsaa.afip.gov.ar` | `servicios1.afip.gov.ar` |
+| Entorno | WSAA | WSFE | WSFEX |
+| --- | --- | --- | --- |
+| Testing | `wsaahomo.afip.gov.ar` | `wswhomo.afip.gov.ar` | `wswhomo.afip.gov.ar` |
+| Producción | `wsaa.afip.gov.ar` | `servicios1.afip.gov.ar` | `servicios1.afip.gov.ar` |
 
 ## Licencia
 
