@@ -111,7 +111,7 @@ export class WsfeClient {
       CbteTipo: cbteTipo,
     })) as FECompUltimoAutorizadoResult;
     checkErrors(result);
-    return result.CbteNro;
+    return Number(result.CbteNro);
   }
 
   async consultarComprobante(
@@ -195,7 +195,7 @@ export class WsfeClient {
       Auth: auth,
     })) as WsfeResult & { RegXReq?: number };
     checkErrors(result);
-    return result.RegXReq ?? 0;
+    return Number(result.RegXReq ?? 0);
   }
 
   // ============================================================

@@ -114,7 +114,7 @@ export class WsfexClient {
       Punto_vta: ptoVta,
     })) as WsfexLastCmpResult;
     checkFexErr(result);
-    return result.FEXResult_LastCMP?.Cbte_nro ?? 0;
+    return Number(result.FEXResult_LastCMP?.Cbte_nro ?? 0);
   }
 
   /**
@@ -125,7 +125,7 @@ export class WsfexClient {
       Auth: auth,
     })) as WsfexLastIdResult;
     checkFexErr(result);
-    return result.FEXResultGet?.Id ?? 0;
+    return Number(result.FEXResultGet?.Id ?? 0);
   }
 
   /**

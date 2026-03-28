@@ -8,6 +8,11 @@ const xmlParser = new XMLParser({
   textNodeName: "#text",
   parseTagValue: true,
   trimValues: true,
+  numberParseOptions: {
+    hex: false,
+    leadingZeros: false,
+    skipLike: /^\d{8,}$/,
+  },
 });
 
 const xmlBuilder = new XMLBuilder({

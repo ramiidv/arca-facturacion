@@ -403,9 +403,9 @@ export class Arca {
       aprobada,
       cae: aprobada ? authResult?.Cae : undefined,
       caeVencimiento: aprobada ? authResult?.Fch_venc_Cae : undefined,
-      cbteNro: authResult?.Cbte_nro ?? nextNum,
-      ptoVta: authResult?.Punto_vta ?? opts.ptoVta,
-      cbteTipo: authResult?.Cbte_tipo ?? opts.cbteTipo,
+      cbteNro: Number(authResult?.Cbte_nro ?? nextNum),
+      ptoVta: Number(authResult?.Punto_vta ?? opts.ptoVta),
+      cbteTipo: Number(authResult?.Cbte_tipo ?? opts.cbteTipo),
       obs: authResult?.Obs,
       raw: result,
     };
