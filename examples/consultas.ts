@@ -1,5 +1,5 @@
 /**
- * Ejemplo: Consultas de parámetros y comprobantes
+ * Ejemplo: Consultas de parámetros y comprobantes (WSFE + WSFEX)
  */
 
 import fs from "fs";
@@ -50,6 +50,22 @@ async function main() {
     );
     console.log("Comprobante consultado:", comprobante.ResultGet);
   }
+
+  // ============================================================
+  // Parámetros WSFEX (exportación)
+  // ============================================================
+
+  const paises = await arca.getPaisesExpo();
+  console.log("Países destino:", paises.slice(0, 5), "...");
+
+  const incoterms = await arca.getIncotermsExpo();
+  console.log("Incoterms:", incoterms);
+
+  const unidades = await arca.getUMedExpo();
+  console.log("Unidades de medida:", unidades.slice(0, 5), "...");
+
+  const tiposExpo = await arca.getTiposExpo();
+  console.log("Tipos de exportación:", tiposExpo);
 }
 
 main().catch(console.error);

@@ -14,7 +14,7 @@
  */
 
 import fs from "fs";
-import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, DocTipo, IvaTipo } from "@ramiidv/arca-sdk";
 
 async function main() {
   // 1. Inicializar el SDK
@@ -43,6 +43,22 @@ async function main() {
     console.log(`  Vencimiento: ${result.caeVencimiento}`);
     console.log(`  Comprobante #${result.cbteNro}`);
     console.log(`  Total: $${result.importes.total}`);
+
+    // 5. Generar URL del QR oficial para imprimir en la factura
+    const qrUrl = Arca.generateQRUrl({
+      fecha: result.caeVencimiento!.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
+      cuit: 20123456789,
+      ptoVta: result.ptoVta,
+      tipoCmp: result.cbteTipo,
+      nroCmp: result.cbteNro,
+      importe: result.importes.total,
+      moneda: "PES",
+      ctz: 1,
+      tipoDocRec: DocTipo.CONSUMIDOR_FINAL,
+      nroDocRec: 0,
+      codAut: Number(result.cae),
+    });
+    console.log(`  QR: ${qrUrl}`);
   } else {
     console.error("Factura rechazada:");
     for (const obs of result.observaciones) {
