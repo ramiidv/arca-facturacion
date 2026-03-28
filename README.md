@@ -7,7 +7,7 @@ Soporta **todos los tipos de comprobante** de WSFEv1: Facturas, Notas de Débito
 ## Instalación
 
 ```bash
-npm install arca-sdk
+npm install @ramiidv/arca-sdk
 ```
 
 ## Requisitos
@@ -21,7 +21,7 @@ npm install arca-sdk
 
 ```typescript
 import fs from "fs";
-import { Arca, CbteTipo, Concepto, DocTipo, IvaTipo, Moneda } from "arca-sdk";
+import { Arca, CbteTipo, Concepto, DocTipo, IvaTipo, Moneda } from "@ramiidv/arca-sdk";
 
 const arca = new Arca({
   cuit: 20123456789,

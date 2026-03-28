@@ -21,7 +21,7 @@ import {
   DocTipo,
   IvaTipo,
   Moneda,
-} from "arca-sdk";
+} from "@ramiidv/arca-sdk";
 
 async function main() {
   // 1. Inicializar el SDK
