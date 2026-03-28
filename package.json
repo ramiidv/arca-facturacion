@@ -1,0 +1,60 @@
+{
+  "name": "arca-sdk",
+  "version": "0.1.0",
+  "description": "SDK para interactuar con los Web Services de ARCA (ex AFIP) - Facturación Electrónica Argentina",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "afip",
+    "arca",
+    "factura-electronica",
+    "wsfe",
+    "wsaa",
+    "argentina",
+    "cae",
+    "invoice",
+    "factura",
+    "mipyme",
+    "fce",
+    "soap",
+    "tax"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ramiidv/arca-sdk.git"
+  },
+  "homepage": "https://github.com/ramiidv/arca-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/ramiidv/arca-sdk/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-forge": "^1.3.1",
+    "fast-xml-parser": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-forge": "^1.3.11",
+    "typescript": "^5.7.0"
+  }
+}
