@@ -2,6 +2,10 @@ import forge from "node-forge";
 import { ENDPOINTS, WSAA_NAMESPACE } from "./constants.js";
 import type { AccessTicket } from "./types.js";
 import { soapCall, parseXml, buildXml } from "./soap-client.js";
+import { ArcaAuthError } from "./errors.js";
+
+/** Margen de seguridad antes de considerar un token expirado (2 minutos). */
+const EXPIRY_MARGIN_MS = 2 * 60_000;
 
 export class WsaaClient {
   private cert: string;
@@ -9,35 +13,54 @@ export class WsaaClient {
   private production: boolean;
   private tokenTTLMinutes: number;
   private ticketCache: Map<string, AccessTicket> = new Map();
+  private pendingLogins: Map<string, Promise<AccessTicket>> = new Map();
+  private timeoutMs: number;
 
   constructor(opts: {
     cert: string;
     key: string;
     production: boolean;
     tokenTTLMinutes: number;
+    timeoutMs: number;
   }) {
     this.cert = opts.cert;
     this.key = opts.key;
     this.production = opts.production;
     this.tokenTTLMinutes = opts.tokenTTLMinutes;
+    this.timeoutMs = opts.timeoutMs;
   }
 
   /**
    * Obtiene un Ticket de Acceso (TA) para el servicio indicado.
    * Cachea el ticket y lo reutiliza si no expiró.
+   * Deduplicates concurrent login requests for the same service.
    */
   async getAccessTicket(service: string): Promise<AccessTicket> {
     const cached = this.ticketCache.get(service);
-    if (cached && cached.expirationTime > new Date()) {
+    if (cached && cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS) {
       return cached;
     }
 
+    // Dedup: si ya hay un login en curso para este servicio, reusar la promesa
+    const pending = this.pendingLogins.get(service);
+    if (pending) return pending;
+
+    const loginPromise = this.performLogin(service);
+    this.pendingLogins.set(service, loginPromise);
+
+    try {
+      const ticket = await loginPromise;
+      this.ticketCache.set(service, ticket);
+      return ticket;
+    } finally {
+      this.pendingLogins.delete(service);
+    }
+  }
+
+  private async performLogin(service: string): Promise<AccessTicket> {
     const tra = this.createTRA(service);
     const cms = this.signTRA(tra);
-    const ticket = await this.loginCms(cms);
-
-    this.ticketCache.set(service, ticket);
-    return ticket;
+    return this.loginCms(cms);
   }
 
   /**
@@ -119,7 +142,7 @@ export class WsaaClient {
 
     const soapBody = `<loginCms xmlns="${WSAA_NAMESPACE}"><in0>${cmsBase64}</in0></loginCms>`;
 
-    const responseXml = await soapCall(endpoint, soapBody, "loginCms");
+    const responseXml = await soapCall(endpoint, soapBody, "loginCms", this.timeoutMs);
 
     const parsed = parseXml(responseXml);
 
@@ -138,7 +161,7 @@ export class WsaaClient {
       loginResponse?.loginCmsReturn || loginResponse?.["ns2:loginCmsReturn"];
 
     if (!loginReturn) {
-      throw new Error(
+      throw new ArcaAuthError(
         `WSAA: respuesta inesperada del servidor.\n${responseXml}`
       );
     }
@@ -155,7 +178,7 @@ export class WsaaClient {
       taXml.loginTicketResponse?.credentials?.sign ?? credentials?.sign;
 
     if (!token || !sign) {
-      throw new Error(
+      throw new ArcaAuthError(
         `WSAA: no se pudo obtener token/sign de la respuesta.\n${loginReturn}`
       );
     }

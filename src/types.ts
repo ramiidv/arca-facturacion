@@ -13,6 +13,8 @@ export interface ArcaConfig {
   production?: boolean;
   /** Tiempo de vida del token en minutos (default: 720 = 12 horas) */
   tokenTTLMinutes?: number;
+  /** Timeout para requests HTTP en milisegundos (default: 30000 = 30 segundos) */
+  requestTimeoutMs?: number;
 }
 
 // ============================================================
@@ -245,4 +247,110 @@ export interface CotizacionResult {
   MonCotiz: number;
   FchCotiz: string;
   Errors?: { Err: WsError | WsError[] };
+}
+
+// ============================================================
+// API Simplificada - Tipos de entrada
+// ============================================================
+
+export interface LineItem {
+  /** Importe neto (sin IVA) */
+  neto: number;
+  /**
+   * Tipo de alícuota IVA (usar enum IvaTipo).
+   * Si no se especifica y exento=false, el item se trata como no gravado (ImpTotConc).
+   */
+  iva?: number;
+  /** Si true, el importe es exento de IVA (va a ImpOpEx) */
+  exento?: boolean;
+}
+
+export interface FacturarOpts {
+  /** Punto de venta */
+  ptoVta: number;
+  /** Tipo de comprobante (usar enum CbteTipo) */
+  cbteTipo: number;
+  /** Items de la factura con importes netos */
+  items: LineItem[];
+  /** Concepto. Default: PRODUCTOS. Se auto-detecta SERVICIOS si se provee `servicio` */
+  concepto?: number;
+  /** Tipo de documento del receptor (usar enum DocTipo). Default: CONSUMIDOR_FINAL */
+  docTipo?: number;
+  /** Número de documento del receptor. Default: 0 */
+  docNro?: number;
+  /** Fecha del comprobante (Date o string YYYYMMDD). Default: hoy (timezone Argentina) */
+  fecha?: Date | string;
+  /** Para servicios: fechas de período y vencimiento de pago */
+  servicio?: {
+    desde: Date | string;
+    hasta: Date | string;
+    vtoPago: Date | string;
+  };
+  /** Código de moneda (usar enum Moneda). Default: PES */
+  moneda?: string;
+  /** Cotización de la moneda. Default: 1 */
+  cotizacion?: number;
+  /** Tributos adicionales */
+  tributos?: Tributo[];
+  /** Datos opcionales (ej: CBU para FCE) */
+  opcionales?: Opcional[];
+}
+
+export interface ComprobanteRef {
+  /** Tipo del comprobante original (usar enum CbteTipo) */
+  tipo: number;
+  /** Punto de venta del comprobante original */
+  ptoVta: number;
+  /** Número del comprobante original */
+  nro: number;
+  /** CUIT del emisor (requerido para FCE) */
+  cuit?: number;
+  /** Fecha del comprobante original (Date o string YYYYMMDD) */
+  fecha?: Date | string;
+}
+
+export interface NotaCreditoOpts extends Omit<FacturarOpts, "cbteTipo"> {
+  /** Comprobante original al que se asocia la nota de crédito.
+   * El tipo de NC se infiere automáticamente del tipo del comprobante original. */
+  comprobanteOriginal: ComprobanteRef;
+}
+
+export interface NotaDebitoOpts extends Omit<FacturarOpts, "cbteTipo"> {
+  /** Comprobante original al que se asocia la nota de débito.
+   * El tipo de ND se infiere automáticamente del tipo del comprobante original. */
+  comprobanteOriginal: ComprobanteRef;
+}
+
+// ============================================================
+// API Simplificada - Tipos de salida
+// ============================================================
+
+export interface Importes {
+  total: number;
+  neto: number;
+  iva: number;
+  exento: number;
+  noGravado: number;
+  tributos: number;
+}
+
+export interface FacturaResult {
+  /** Si el comprobante fue aprobado por ARCA */
+  aprobada: boolean;
+  /** CAE otorgado (solo si aprobada) */
+  cae?: string;
+  /** Fecha de vencimiento del CAE en formato YYYYMMDD */
+  caeVencimiento?: string;
+  /** Número de comprobante asignado */
+  cbteNro: number;
+  /** Punto de venta */
+  ptoVta: number;
+  /** Tipo de comprobante */
+  cbteTipo: number;
+  /** Importes calculados y enviados */
+  importes: Importes;
+  /** Observaciones de ARCA (pueden existir incluso si fue aprobada) */
+  observaciones: { code: number; msg: string }[];
+  /** Resultado crudo de FECAESolicitar */
+  raw: FECAESolicitarResult;
 }

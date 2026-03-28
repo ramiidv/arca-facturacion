@@ -1,5 +1,6 @@
 import { ENDPOINTS } from "./constants.js";
 import { wsfeSoapCall } from "./soap-client.js";
+import { ArcaWSFEError } from "./errors.js";
 import type {
   WsfeAuth,
   InvoiceRequest,
@@ -23,18 +24,19 @@ function toArray<T>(val: T | T[] | undefined): T[] {
 function checkErrors(result: { Errors?: { Err: WsError | WsError[] } }): void {
   if (result.Errors) {
     const errs = toArray(result.Errors.Err);
-    const msg = errs.map((e) => `[${e.Code}] ${e.Msg}`).join("; ");
-    throw new Error(`WSFE Error: ${msg}`);
+    throw new ArcaWSFEError(errs.map((e) => ({ code: e.Code, msg: e.Msg })));
   }
 }
 
 export class WsfeClient {
   private endpoint: string;
+  private timeoutMs: number;
 
-  constructor(production: boolean) {
+  constructor(production: boolean, timeoutMs: number = 30_000) {
     this.endpoint = production
       ? ENDPOINTS.wsfe.production
       : ENDPOINTS.wsfe.testing;
+    this.timeoutMs = timeoutMs;
   }
 
   // ============================================================
@@ -69,9 +71,11 @@ export class WsfeClient {
     const result = (await wsfeSoapCall(
       this.endpoint,
       "FECAESolicitar",
-      params
+      params,
+      this.timeoutMs
     )) as FECAESolicitarResult;
 
+    checkErrors(result);
     return result;
   }
 
@@ -90,7 +94,8 @@ export class WsfeClient {
         Auth: auth,
         PtoVta: ptoVta,
         CbteTipo: cbteTipo,
-      }
+      },
+      this.timeoutMs
     )) as FECompUltimoAutorizadoResult;
 
     checkErrors(result);
@@ -113,7 +118,7 @@ export class WsfeClient {
         CbteNro: cbteNro,
         PtoVta: ptoVta,
       },
-    })) as FECompConsultarResult;
+    }, this.timeoutMs)) as FECompConsultarResult;
 
     checkErrors(result);
     return result;
@@ -127,7 +132,7 @@ export class WsfeClient {
    * Verifica el estado de los servidores de ARCA.
    */
   async serverStatus(): Promise<ServerStatus> {
-    const result = await wsfeSoapCall(this.endpoint, "FEDummy", {});
+    const result = await wsfeSoapCall(this.endpoint, "FEDummy", {}, this.timeoutMs);
     return result as ServerStatus;
   }
 
@@ -138,10 +143,26 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposCbte",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.CbteTipo;
+    return toArray(items);
+  }
+
+  /**
+   * Obtiene los tipos de concepto disponibles.
+   */
+  async getTiposConcepto(auth: WsfeAuth): Promise<ParamItem[]> {
+    const result = await wsfeSoapCall(
+      this.endpoint,
+      "FEParamGetTiposConcepto",
+      { Auth: auth },
+      this.timeoutMs
+    );
+    checkErrors(result as any);
+    const items = (result as any).ResultGet?.ConceptoTipo;
     return toArray(items);
   }
 
@@ -152,7 +173,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposDoc",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.DocTipo;
@@ -166,7 +188,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposIva",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.IvaTipo;
@@ -180,7 +203,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposMonedas",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.Moneda;
@@ -194,7 +218,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposTributos",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.TributoTipo;
@@ -208,7 +233,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetTiposOpcional",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.OpcionalTipo;
@@ -222,7 +248,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FEParamGetPtosVenta",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     const items = (result as any).ResultGet?.PtoVenta;
@@ -242,7 +269,8 @@ export class WsfeClient {
       {
         Auth: auth,
         MonId: monedaId,
-      }
+      },
+      this.timeoutMs
     )) as CotizacionResult;
 
     checkErrors(result as any);
@@ -256,7 +284,8 @@ export class WsfeClient {
     const result = await wsfeSoapCall(
       this.endpoint,
       "FECompTotXRequest",
-      { Auth: auth }
+      { Auth: auth },
+      this.timeoutMs
     );
     checkErrors(result as any);
     return (result as any).RegXReq ?? 0;

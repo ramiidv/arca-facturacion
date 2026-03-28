@@ -160,6 +160,47 @@ export enum Moneda {
 }
 
 // ============================================================
+// Mapeos de CbteTipo: Factura → Nota Crédito / Nota Débito
+// ============================================================
+
+export const NOTA_CREDITO_MAP: Record<number, number> = {
+  [CbteTipo.FACTURA_A]: CbteTipo.NOTA_CREDITO_A,
+  [CbteTipo.FACTURA_B]: CbteTipo.NOTA_CREDITO_B,
+  [CbteTipo.FACTURA_C]: CbteTipo.NOTA_CREDITO_C,
+  [CbteTipo.FACTURA_E]: CbteTipo.NOTA_CREDITO_E,
+  [CbteTipo.FACTURA_M]: CbteTipo.NOTA_CREDITO_M,
+  [CbteTipo.FCE_FACTURA_A]: CbteTipo.FCE_NOTA_CREDITO_A,
+  [CbteTipo.FCE_FACTURA_B]: CbteTipo.FCE_NOTA_CREDITO_B,
+  [CbteTipo.FCE_FACTURA_C]: CbteTipo.FCE_NOTA_CREDITO_C,
+};
+
+export const NOTA_DEBITO_MAP: Record<number, number> = {
+  [CbteTipo.FACTURA_A]: CbteTipo.NOTA_DEBITO_A,
+  [CbteTipo.FACTURA_B]: CbteTipo.NOTA_DEBITO_B,
+  [CbteTipo.FACTURA_C]: CbteTipo.NOTA_DEBITO_C,
+  [CbteTipo.FACTURA_E]: CbteTipo.NOTA_DEBITO_E,
+  [CbteTipo.FACTURA_M]: CbteTipo.NOTA_DEBITO_M,
+  [CbteTipo.FCE_FACTURA_A]: CbteTipo.FCE_NOTA_DEBITO_A,
+  [CbteTipo.FCE_FACTURA_B]: CbteTipo.FCE_NOTA_DEBITO_B,
+  [CbteTipo.FCE_FACTURA_C]: CbteTipo.FCE_NOTA_DEBITO_C,
+};
+
+/** CbteTipo que NO discriminan IVA (Monotributista - tipo C) */
+const TIPOS_C = new Set([
+  CbteTipo.FACTURA_C,
+  CbteTipo.NOTA_DEBITO_C,
+  CbteTipo.NOTA_CREDITO_C,
+  CbteTipo.RECIBO_C,
+  CbteTipo.FCE_FACTURA_C,
+  CbteTipo.FCE_NOTA_DEBITO_C,
+  CbteTipo.FCE_NOTA_CREDITO_C,
+]);
+
+export function isTipoC(cbteTipo: number): boolean {
+  return TIPOS_C.has(cbteTipo);
+}
+
+// ============================================================
 // Tipos de Tributo
 // ============================================================
 

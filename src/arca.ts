@@ -1,5 +1,12 @@
 import { WsaaClient } from "./wsaa.js";
 import { WsfeClient } from "./wsfe.js";
+import {
+  buildInvoiceDetail,
+  parseFacturaResult,
+  toDateString,
+  calcularTotales,
+} from "./facturacion.js";
+import { ArcaError } from "./errors.js";
 import type {
   ArcaConfig,
   WsfeAuth,
@@ -13,8 +20,22 @@ import type {
   MonedaItem,
   PtoVentaItem,
   CotizacionResult,
+  FacturarOpts,
+  NotaCreditoOpts,
+  NotaDebitoOpts,
+  FacturaResult,
+  LineItem,
+  Importes,
 } from "./types.js";
-import { CbteTipo, Concepto, DocTipo, IvaTipo, Moneda } from "./constants.js";
+import {
+  CbteTipo,
+  Concepto,
+  DocTipo,
+  IvaTipo,
+  Moneda,
+  NOTA_CREDITO_MAP,
+  NOTA_DEBITO_MAP,
+} from "./constants.js";
 
 export class Arca {
   private wsaa: WsaaClient;
@@ -25,15 +46,17 @@ export class Arca {
   constructor(config: ArcaConfig) {
     this.cuit = config.cuit;
     this.production = config.production ?? false;
+    const timeoutMs = config.requestTimeoutMs ?? 30_000;
 
     this.wsaa = new WsaaClient({
       cert: config.cert,
       key: config.key,
       production: this.production,
       tokenTTLMinutes: config.tokenTTLMinutes ?? 720,
+      timeoutMs,
     });
 
-    this.wsfe = new WsfeClient(this.production);
+    this.wsfe = new WsfeClient(this.production, timeoutMs);
   }
 
   // ============================================================
@@ -133,6 +156,133 @@ export class Arca {
     });
   }
 
+  // ============================================================
+  // Facturación - API Simplificada
+  // ============================================================
+
+  /**
+   * Crea una factura con API simplificada.
+   * Calcula automáticamente IVA, totales, y número de comprobante.
+   *
+   * @example
+   * ```ts
+   * const result = await arca.facturar({
+   *   ptoVta: 1,
+   *   cbteTipo: CbteTipo.FACTURA_B,
+   *   items: [
+   *     { neto: 1000, iva: IvaTipo.IVA_21 },
+   *     { neto: 500, iva: IvaTipo.IVA_10_5 },
+   *   ],
+   * });
+   *
+   * if (result.aprobada) {
+   *   console.log(`CAE: ${result.cae}, Cbte: ${result.cbteNro}`);
+   * }
+   * ```
+   */
+  async facturar(opts: FacturarOpts): Promise<FacturaResult> {
+    const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
+    const { detail, importes } = buildInvoiceDetail(opts, nextNum);
+
+    const result = await this.crearFactura({
+      PtoVta: opts.ptoVta,
+      CbteTipo: opts.cbteTipo,
+      invoices: [detail],
+    });
+
+    return parseFacturaResult(result, importes);
+  }
+
+  /**
+   * Crea una nota de crédito asociada a un comprobante original.
+   * El tipo de NC se infiere automáticamente del tipo del comprobante original.
+   *
+   * @example
+   * ```ts
+   * const result = await arca.notaCredito({
+   *   ptoVta: 1,
+   *   comprobanteOriginal: {
+   *     tipo: CbteTipo.FACTURA_B,
+   *     ptoVta: 1,
+   *     nro: 5,
+   *   },
+   *   items: [{ neto: 500, iva: IvaTipo.IVA_21 }],
+   * });
+   * ```
+   */
+  async notaCredito(opts: NotaCreditoOpts): Promise<FacturaResult> {
+    const cbteTipo = NOTA_CREDITO_MAP[opts.comprobanteOriginal.tipo];
+    if (cbteTipo === undefined) {
+      throw new ArcaError(
+        `No se puede inferir el tipo de Nota de Crédito para CbteTipo ${opts.comprobanteOriginal.tipo}`
+      );
+    }
+    return this.facturarConAsociado(cbteTipo, opts);
+  }
+
+  /**
+   * Crea una nota de débito asociada a un comprobante original.
+   * El tipo de ND se infiere automáticamente del tipo del comprobante original.
+   *
+   * @example
+   * ```ts
+   * const result = await arca.notaDebito({
+   *   ptoVta: 1,
+   *   comprobanteOriginal: {
+   *     tipo: CbteTipo.FACTURA_A,
+   *     ptoVta: 1,
+   *     nro: 10,
+   *     fecha: "20260301",
+   *   },
+   *   docTipo: DocTipo.CUIT,
+   *   docNro: 20123456789,
+   *   items: [{ neto: 200, iva: IvaTipo.IVA_21 }],
+   * });
+   * ```
+   */
+  async notaDebito(opts: NotaDebitoOpts): Promise<FacturaResult> {
+    const cbteTipo = NOTA_DEBITO_MAP[opts.comprobanteOriginal.tipo];
+    if (cbteTipo === undefined) {
+      throw new ArcaError(
+        `No se puede inferir el tipo de Nota de Débito para CbteTipo ${opts.comprobanteOriginal.tipo}`
+      );
+    }
+    return this.facturarConAsociado(cbteTipo, opts);
+  }
+
+  private async facturarConAsociado(
+    cbteTipo: number,
+    opts: NotaCreditoOpts | NotaDebitoOpts
+  ): Promise<FacturaResult> {
+    const orig = opts.comprobanteOriginal;
+    const fullOpts: FacturarOpts = {
+      ...opts,
+      cbteTipo,
+    };
+
+    const nextNum = await this.siguienteComprobante(opts.ptoVta, cbteTipo);
+    const { detail, importes } = buildInvoiceDetail(fullOpts, nextNum);
+
+    // Agregar comprobante asociado
+    detail.CbtesAsoc = [
+      {
+        Tipo: orig.tipo,
+        PtoVta: orig.ptoVta,
+        Nro: orig.nro,
+        ...(orig.cuit !== undefined && { Cuit: orig.cuit }),
+        ...(orig.fecha !== undefined && { CbteFch: toDateString(orig.fecha) }),
+      },
+    ];
+
+    const result = await this.crearFactura({
+      PtoVta: opts.ptoVta,
+      CbteTipo: cbteTipo,
+      invoices: [detail],
+    });
+
+    return parseFacturaResult(result, importes);
+  }
+
   /**
    * Consulta un comprobante previamente autorizado.
    */
@@ -161,6 +311,12 @@ export class Arca {
   async getTiposComprobante(): Promise<ParamItem[]> {
     const auth = await this.getAuth();
     return this.wsfe.getTiposComprobante(auth);
+  }
+
+  /** Obtiene los tipos de concepto disponibles (Productos, Servicios, Productos y Servicios). */
+  async getTiposConcepto(): Promise<ParamItem[]> {
+    const auth = await this.getAuth();
+    return this.wsfe.getTiposConcepto(auth);
   }
 
   /** Obtiene los tipos de documento disponibles. */
@@ -242,12 +398,30 @@ export class Arca {
 
   /**
    * Formatea una fecha Date a formato YYYYMMDD requerido por ARCA.
+   * Usa timezone America/Argentina/Buenos_Aires.
    */
-  static formatDate(date: Date): string {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, "0");
-    const d = String(date.getDate()).padStart(2, "0");
-    return `${y}${m}${d}`;
+  static formatDate(date: Date | string): string {
+    return toDateString(date);
+  }
+
+  /**
+   * Calcula los importes de una factura a partir de line items.
+   * Útil para previsualizar totales antes de enviar a ARCA.
+   *
+   * @example
+   * ```ts
+   * const { importes } = Arca.calcularTotales([
+   *   { neto: 1000, iva: IvaTipo.IVA_21 },
+   *   { neto: 500, iva: IvaTipo.IVA_10_5 },
+   * ]);
+   * console.log(importes.total); // 1762.5
+   * ```
+   */
+  static calcularTotales(
+    items: LineItem[],
+    opts?: { tributos?: { Importe: number }[]; tipoC?: boolean }
+  ) {
+    return calcularTotales(items, opts);
   }
 
   /**

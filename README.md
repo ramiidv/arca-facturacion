@@ -21,7 +21,7 @@ npm install @ramiidv/arca-sdk
 
 ```typescript
 import fs from "fs";
-import { Arca, CbteTipo, Concepto, DocTipo, IvaTipo, Moneda } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-sdk";
 
 const arca = new Arca({
   cuit: 20123456789,
@@ -30,26 +30,304 @@ const arca = new Arca({
   production: false, // true para producción
 });
 
-// Crear factura B para consumidor final (obtiene el número automáticamente)
-const result = await arca.crearFacturaAuto(1, CbteTipo.FACTURA_B, {
-  Concepto: Concepto.PRODUCTOS,
-  DocTipo: DocTipo.CONSUMIDOR_FINAL,
-  DocNro: 0,
-  CbteFch: Arca.formatDate(new Date()),
-  ImpTotal: 121,
-  ImpTotConc: 0,
-  ImpNeto: 100,
-  ImpOpEx: 0,
-  ImpTrib: 0,
-  ImpIVA: 21,
-  MonId: Moneda.PESOS,
-  MonCotiz: 1,
-  Iva: [{ Id: IvaTipo.IVA_21, BaseImp: 100, Importe: 21 }],
+// Crear factura B para consumidor final
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [
+    { neto: 1000, iva: IvaTipo.IVA_21 },
+    { neto: 500, iva: IvaTipo.IVA_10_5 },
+  ],
 });
 
-const { approved, cae, caeFchVto } = Arca.extractCAE(result);
-console.log(approved ? `CAE: ${cae}` : "Rechazada");
+if (result.aprobada) {
+  console.log(`CAE: ${result.cae}`);
+  console.log(`Vencimiento: ${result.caeVencimiento}`);
+  console.log(`Comprobante #${result.cbteNro}`);
+  console.log(`Total: $${result.importes.total}`); // 1762.5
+}
 ```
+
+El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), y agrupa alícuotas de IVA.
+
+## Configuración
+
+```typescript
+const arca = new Arca({
+  cuit: 20123456789,          // CUIT sin guiones
+  cert: "...",                 // Certificado X.509 (PEM)
+  key: "...",                  // Clave privada (PEM)
+  production: false,           // Default: false (testing/homologación)
+  tokenTTLMinutes: 720,        // Default: 720 (12 horas)
+  requestTimeoutMs: 30_000,    // Default: 30000 (30 segundos)
+});
+```
+
+## Ejemplos
+
+### Factura B — Consumidor final (caso más común)
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+  // DocTipo, DocNro, fecha, moneda, concepto → se completan automáticamente
+});
+// result.importes.total === 121
+```
+
+### Factura A — Servicios a otra empresa
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 50000, iva: IvaTipo.IVA_21 }],
+  servicio: {
+    desde: new Date("2026-03-01"),
+    hasta: new Date("2026-03-31"),
+    vtoPago: new Date("2026-04-15"),
+  },
+  // concepto se auto-detecta como SERVICIOS al proveer `servicio`
+});
+```
+
+### Factura con múltiples alícuotas de IVA
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [
+    { neto: 1000, iva: IvaTipo.IVA_21 },   // IVA: 210
+    { neto: 500, iva: IvaTipo.IVA_10_5 },   // IVA: 52.5
+    { neto: 200, iva: IvaTipo.IVA_0 },      // IVA: 0 (gravado al 0%)
+    { neto: 300, exento: true },             // Exento (ImpOpEx)
+    { neto: 150 },                           // No gravado (ImpTotConc)
+  ],
+});
+// result.importes:
+//   neto: 1700, iva: 262.5, exento: 300, noGravado: 150, total: 2412.5
+```
+
+### Factura C — Monotributista
+
+Para comprobantes tipo C, el SDK no discrimina IVA automáticamente.
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_C,
+  items: [{ neto: 5000 }],
+});
+// ImpNeto: 5000, ImpIVA: 0, ImpTotal: 5000
+```
+
+### Nota de crédito
+
+El tipo de NC se infiere automáticamente del comprobante original (FACTURA_B → NOTA_CREDITO_B).
+
+```typescript
+const result = await arca.notaCredito({
+  ptoVta: 1,
+  comprobanteOriginal: {
+    tipo: CbteTipo.FACTURA_B,
+    ptoVta: 1,
+    nro: 150,
+  },
+  items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+});
+```
+
+### Nota de débito
+
+```typescript
+const result = await arca.notaDebito({
+  ptoVta: 1,
+  comprobanteOriginal: {
+    tipo: CbteTipo.FACTURA_A,
+    ptoVta: 1,
+    nro: 200,
+    fecha: "20260301",
+  },
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 500, iva: IvaTipo.IVA_21 }],
+});
+```
+
+### Factura MiPyME (FCE)
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FCE_FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 100000, iva: IvaTipo.IVA_21 }],
+  opcionales: [{ Id: "2101", Valor: "0110012345678901234567" }], // CBU obligatorio
+});
+```
+
+### Previsualizar totales sin enviar
+
+```typescript
+const { importes, iva } = Arca.calcularTotales([
+  { neto: 1000, iva: IvaTipo.IVA_21 },
+  { neto: 500, iva: IvaTipo.IVA_10_5 },
+]);
+console.log(importes);
+// { total: 1762.5, neto: 1500, iva: 262.5, exento: 0, noGravado: 0, tributos: 0 }
+```
+
+### Factura en moneda extranjera
+
+```typescript
+const cotiz = await arca.getCotizacion(Moneda.DOLARES);
+
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 1000, iva: IvaTipo.IVA_21 }],
+  moneda: Moneda.DOLARES,
+  cotizacion: cotiz.MonCotiz,
+});
+```
+
+## Manejo de errores
+
+El SDK provee clases de error específicas para catch granular:
+
+```typescript
+import {
+  Arca,
+  ArcaAuthError,
+  ArcaWSFEError,
+  ArcaSoapError,
+} from "@ramiidv/arca-sdk";
+
+try {
+  const result = await arca.facturar({ ... });
+} catch (e) {
+  if (e instanceof ArcaAuthError) {
+    // Error de autenticación WSAA (certificado inválido, expirado, etc.)
+    console.error("Auth error:", e.message);
+    arca.clearAuthCache(); // Limpiar cache e intentar de nuevo
+  }
+
+  if (e instanceof ArcaWSFEError) {
+    // Error de WSFE con códigos de ARCA
+    for (const err of e.errors) {
+      console.error(`[${err.code}] ${err.msg}`);
+    }
+  }
+
+  if (e instanceof ArcaSoapError) {
+    // Error HTTP/SOAP (timeout, servidor caído, etc.)
+    console.error("HTTP status:", e.statusCode);
+  }
+}
+```
+
+| Clase | Cuándo se lanza |
+| --- | --- |
+| `ArcaAuthError` | Falla en login WSAA, respuesta inesperada, token/sign inválidos |
+| `ArcaWSFEError` | Error devuelto por WSFE (campos inválidos, CUIT no autorizado, etc.). Contiene `errors: { code, msg }[]` |
+| `ArcaSoapError` | Error HTTP, timeout, SOAP Fault. Contiene `statusCode?: number` |
+| `ArcaError` | Clase base para todos los errores del SDK |
+
+## Consultas
+
+```typescript
+// Estado del servidor
+const status = await arca.serverStatus();
+
+// Último comprobante autorizado
+const ultimo = await arca.ultimoComprobante(1, CbteTipo.FACTURA_B);
+
+// Consultar un comprobante
+const cbte = await arca.consultarComprobante(CbteTipo.FACTURA_B, 1, 150);
+
+// Puntos de venta habilitados
+const ptosVenta = await arca.getPuntosVenta();
+
+// Cotización del dólar
+const cotiz = await arca.getCotizacion(Moneda.DOLARES);
+
+// Tipos disponibles
+const tiposCbte = await arca.getTiposComprobante();
+const tiposConcepto = await arca.getTiposConcepto();
+const tiposDoc = await arca.getTiposDocumento();
+const tiposIva = await arca.getTiposIva();
+const monedas = await arca.getMonedas();
+const tiposTrib = await arca.getTiposTributo();
+const tiposOpc = await arca.getTiposOpcional();
+const maxRegs = await arca.getCantMaxRegistros();
+```
+
+## API
+
+### `new Arca(config)`
+
+| Parámetro | Tipo | Default | Descripción |
+| --- | --- | --- | --- |
+| `cuit` | `number` | — | CUIT del contribuyente (sin guiones) |
+| `cert` | `string` | — | Contenido del certificado X.509 (PEM) |
+| `key` | `string` | — | Contenido de la clave privada (PEM) |
+| `production` | `boolean` | `false` | Entorno de producción |
+| `tokenTTLMinutes` | `number` | `720` | TTL del token en minutos |
+| `requestTimeoutMs` | `number` | `30000` | Timeout HTTP en milisegundos |
+
+### Facturación — API simplificada
+
+| Método | Descripción |
+| --- | --- |
+| `facturar(opts)` | Crea un comprobante con cálculo automático de IVA y totales |
+| `notaCredito(opts)` | Crea nota de crédito asociada (tipo NC inferido automáticamente) |
+| `notaDebito(opts)` | Crea nota de débito asociada (tipo ND inferido automáticamente) |
+
+Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `importes`, `observaciones`, `raw`.
+
+### Facturación — API raw
+
+| Método | Descripción |
+| --- | --- |
+| `crearFactura(request)` | Solicita CAE para uno o más comprobantes (sin auto-cálculo) |
+| `crearFacturaAuto(ptoVta, cbteTipo, invoice)` | Como `crearFactura` pero obtiene el número automáticamente |
+| `ultimoComprobante(ptoVta, cbteTipo)` | Último número autorizado |
+| `siguienteComprobante(ptoVta, cbteTipo)` | Siguiente número (último + 1) |
+| `consultarComprobante(cbteTipo, ptoVta, cbteNro)` | Consulta un comprobante existente |
+
+### Parámetros
+
+| Método | Descripción |
+| --- | --- |
+| `serverStatus()` | Estado de los servidores |
+| `getTiposComprobante()` | Lista de tipos de comprobante |
+| `getTiposConcepto()` | Lista de tipos de concepto |
+| `getTiposDocumento()` | Lista de tipos de documento |
+| `getTiposIva()` | Lista de alícuotas de IVA |
+| `getMonedas()` | Lista de monedas |
+| `getTiposTributo()` | Lista de tipos de tributo |
+| `getTiposOpcional()` | Lista de datos opcionales |
+| `getPuntosVenta()` | Puntos de venta habilitados |
+| `getCotizacion(monedaId)` | Cotización de una moneda |
+| `getCantMaxRegistros()` | Máx registros por request |
+
+### Utilidades estáticas
+
+| Método | Descripción |
+| --- | --- |
+| `Arca.calcularTotales(items, opts?)` | Calcula importes e IVA sin enviar a ARCA |
+| `Arca.extractCAE(result)` | Extrae CAE del resultado raw |
+| `Arca.formatDate(date)` | Formatea `Date` a `YYYYMMDD` (timezone Argentina) |
 
 ## Tipos de comprobante soportados
 
@@ -86,180 +364,17 @@ console.log(approved ? `CAE: ${cae}` : "Rechazada");
 
 Tambien se incluyen tipos especiales: `COMPRA_BIENES_USADOS` (49), `CTA_VTA_LIQ_PROD_A/B` (60/61), `LIQUIDACION_A/B` (63/64), y comprobantes RG 1415 (34, 35, 39, 40).
 
-## Ejemplos
-
-### Factura A por servicios
-
-Para servicios (`Concepto.SERVICIOS` o `Concepto.PRODUCTOS_Y_SERVICIOS`), es obligatorio incluir las fechas de servicio y vencimiento de pago.
-
-```typescript
-const result = await arca.crearFacturaAuto(1, CbteTipo.FACTURA_A, {
-  Concepto: Concepto.SERVICIOS,
-  DocTipo: DocTipo.CUIT,
-  DocNro: 30712345678,
-  CbteFch: Arca.formatDate(new Date()),
-  ImpTotal: 60500,
-  ImpTotConc: 0,
-  ImpNeto: 50000,
-  ImpOpEx: 0,
-  ImpTrib: 0,
-  ImpIVA: 10500,
-  MonId: Moneda.PESOS,
-  MonCotiz: 1,
-  FchServDesde: "20260301",
-  FchServHasta: "20260331",
-  FchVtoPago: "20260415",
-  Iva: [{ Id: IvaTipo.IVA_21, BaseImp: 50000, Importe: 10500 }],
-});
-```
-
-### Nota de crédito
-
-```typescript
-const result = await arca.crearFacturaAuto(1, CbteTipo.NOTA_CREDITO_B, {
-  Concepto: Concepto.PRODUCTOS,
-  DocTipo: DocTipo.CONSUMIDOR_FINAL,
-  DocNro: 0,
-  CbteFch: Arca.formatDate(new Date()),
-  ImpTotal: 121,
-  ImpTotConc: 0,
-  ImpNeto: 100,
-  ImpOpEx: 0,
-  ImpTrib: 0,
-  ImpIVA: 21,
-  MonId: Moneda.PESOS,
-  MonCotiz: 1,
-  Iva: [{ Id: IvaTipo.IVA_21, BaseImp: 100, Importe: 21 }],
-  // Asociar con la factura original
-  CbtesAsoc: [{ Tipo: CbteTipo.FACTURA_B, PtoVta: 1, Nro: 150 }],
-});
-```
-
-### Factura con múltiples alícuotas de IVA
-
-```typescript
-const result = await arca.crearFacturaAuto(1, CbteTipo.FACTURA_A, {
-  Concepto: Concepto.PRODUCTOS,
-  DocTipo: DocTipo.CUIT,
-  DocNro: 30712345678,
-  CbteFch: Arca.formatDate(new Date()),
-  ImpTotal: 1352.5,
-  ImpTotConc: 0,
-  ImpNeto: 1100, // 1000 + 100
-  ImpOpEx: 0,
-  ImpTrib: 0,
-  ImpIVA: 252.5, // 210 + 42.5 (nota: no incluye el IVA 0%)
-  MonId: Moneda.PESOS,
-  MonCotiz: 1,
-  Iva: [
-    { Id: IvaTipo.IVA_21, BaseImp: 1000, Importe: 210 },
-    { Id: IvaTipo.IVA_10_5, BaseImp: 100, Importe: 10.5 },
-    // Para incluir items al 0%, se debe declarar también:
-    // { Id: IvaTipo.IVA_0, BaseImp: 500, Importe: 0 },
-  ],
-});
-```
-
-### Factura MiPyME (FCE)
-
-```typescript
-const result = await arca.crearFacturaAuto(1, CbteTipo.FCE_FACTURA_A, {
-  Concepto: Concepto.PRODUCTOS,
-  DocTipo: DocTipo.CUIT,
-  DocNro: 30712345678,
-  CbteFch: Arca.formatDate(new Date()),
-  ImpTotal: 121000,
-  ImpTotConc: 0,
-  ImpNeto: 100000,
-  ImpOpEx: 0,
-  ImpTrib: 0,
-  ImpIVA: 21000,
-  MonId: Moneda.PESOS,
-  MonCotiz: 1,
-  Iva: [{ Id: IvaTipo.IVA_21, BaseImp: 100000, Importe: 21000 }],
-  // Dato obligatorio para FCE: CBU del emisor
-  Opcionales: [{ Id: "2101", Valor: "0110012345678901234567" }],
-});
-```
-
-## Consultas
-
-```typescript
-// Estado del servidor
-const status = await arca.serverStatus();
-
-// Último comprobante autorizado
-const ultimo = await arca.ultimoComprobante(1, CbteTipo.FACTURA_B);
-
-// Consultar un comprobante
-const cbte = await arca.consultarComprobante(CbteTipo.FACTURA_B, 1, 150);
-
-// Puntos de venta habilitados
-const ptosVenta = await arca.getPuntosVenta();
-
-// Cotización del dólar
-const cotiz = await arca.getCotizacion(Moneda.DOLARES);
-
-// Tipos de comprobante, documento, IVA, monedas, tributos
-const tiposCbte = await arca.getTiposComprobante();
-const tiposDoc = await arca.getTiposDocumento();
-const tiposIva = await arca.getTiposIva();
-const monedas = await arca.getMonedas();
-const tiposTrib = await arca.getTiposTributo();
-```
-
-## API
-
-### `new Arca(config)`
-
-| Parámetro | Tipo | Descripción |
-| --- | --- | --- |
-| `cuit` | `number` | CUIT del contribuyente (sin guiones) |
-| `cert` | `string` | Contenido del certificado X.509 (PEM) |
-| `key` | `string` | Contenido de la clave privada (PEM) |
-| `production` | `boolean` | `false` = testing (default), `true` = producción |
-| `tokenTTLMinutes` | `number` | TTL del token en minutos (default: 720 = 12h) |
-
-### Facturación
-
-| Método | Descripción |
-| --- | --- |
-| `crearFactura(request)` | Solicita CAE para uno o más comprobantes |
-| `crearFacturaAuto(ptoVta, cbteTipo, invoice)` | Obtiene el número automáticamente y crea la factura |
-| `ultimoComprobante(ptoVta, cbteTipo)` | Último número autorizado |
-| `siguienteComprobante(ptoVta, cbteTipo)` | Siguiente número (último + 1) |
-| `consultarComprobante(cbteTipo, ptoVta, cbteNro)` | Consulta un comprobante existente |
-
-### Parámetros
-
-| Método | Descripción |
-| --- | --- |
-| `serverStatus()` | Estado de los servidores |
-| `getTiposComprobante()` | Lista de tipos de comprobante |
-| `getTiposDocumento()` | Lista de tipos de documento |
-| `getTiposIva()` | Lista de alícuotas de IVA |
-| `getMonedas()` | Lista de monedas |
-| `getTiposTributo()` | Lista de tipos de tributo |
-| `getTiposOpcional()` | Lista de datos opcionales |
-| `getPuntosVenta()` | Puntos de venta habilitados |
-| `getCotizacion(monedaId)` | Cotización de una moneda |
-| `getCantMaxRegistros()` | Máx registros por request |
-
-### Utilidades estáticas
-
-| Método | Descripción |
-| --- | --- |
-| `Arca.extractCAE(result)` | Extrae CAE y estado del resultado |
-| `Arca.formatDate(date)` | Formatea `Date` a `YYYYMMDD` |
-
 ## Enums disponibles
 
 - `CbteTipo` — Tipos de comprobante
 - `Concepto` — Tipos de concepto (Productos, Servicios, Ambos)
-- `DocTipo` — Tipos de documento (CUIT, DNI, etc.)
+- `DocTipo` — Tipos de documento (CUIT, DNI, Consumidor Final, etc.)
 - `IvaTipo` — Alícuotas de IVA (0%, 2.5%, 5%, 10.5%, 21%, 27%)
+- `IVA_RATES` — Record que mapea IvaTipo a su porcentaje numérico
 - `Moneda` — Códigos de moneda (PES, DOL, EUR, etc.)
 - `TributoTipo` — Tipos de tributo
+- `NOTA_CREDITO_MAP` — Mapeo de tipo factura → tipo nota de crédito
+- `NOTA_DEBITO_MAP` — Mapeo de tipo factura → tipo nota de débito
 
 ## Entornos
 

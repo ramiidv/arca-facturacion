@@ -1,4 +1,5 @@
 import { XMLParser, XMLBuilder } from "fast-xml-parser";
+import { ArcaSoapError } from "./errors.js";
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -37,7 +38,8 @@ export function buildXml(obj: Record<string, any>): string {
 export async function soapCall(
   endpoint: string,
   bodyContent: string,
-  soapAction?: string
+  soapAction?: string,
+  timeoutMs: number = 30_000
 ): Promise<string> {
   const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
@@ -56,17 +58,32 @@ export async function soapCall(
     headers["SOAPAction"] = `"${soapAction}"`;
   }
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: soapEnvelope,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: soapEnvelope,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new ArcaSoapError(`SOAP request timeout after ${timeoutMs}ms: ${endpoint}`);
+    }
+    throw new ArcaSoapError(`SOAP request failed: ${err?.message ?? err}`);
+  } finally {
+    clearTimeout(timer);
+  }
 
   const responseText = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `SOAP HTTP ${response.status}: ${response.statusText}\n${responseText}`
+    throw new ArcaSoapError(
+      `SOAP HTTP ${response.status}: ${response.statusText}\n${responseText}`,
+      response.status
     );
   }
 
@@ -80,7 +97,8 @@ export async function soapCall(
 export async function wsfeSoapCall(
   endpoint: string,
   method: string,
-  params: Record<string, any>
+  params: Record<string, any>,
+  timeoutMs: number = 30_000
 ): Promise<Record<string, any>> {
   const namespace = "http://ar.gov.afip.dif.FEV1/";
 
@@ -92,7 +110,7 @@ export async function wsfeSoapCall(
   });
 
   const soapAction = `${namespace}${method}`;
-  const responseXml = await soapCall(endpoint, bodyContent, soapAction);
+  const responseXml = await soapCall(endpoint, bodyContent, soapAction, timeoutMs);
   const parsed = parseXml(responseXml);
 
   // Extraer el body del SOAP envelope
@@ -102,7 +120,7 @@ export async function wsfeSoapCall(
     parsed["S:Envelope"];
 
   if (!envelope) {
-    throw new Error(`Respuesta SOAP inválida:\n${responseXml}`);
+    throw new ArcaSoapError(`Respuesta SOAP inválida:\n${responseXml}`);
   }
 
   const body =
@@ -110,14 +128,14 @@ export async function wsfeSoapCall(
 
   if (!body) {
     // Verificar si hay un SOAP Fault
-    throw new Error(`SOAP Body no encontrado en la respuesta:\n${responseXml}`);
+    throw new ArcaSoapError(`SOAP Body no encontrado en la respuesta:\n${responseXml}`);
   }
 
   // Verificar SOAP Fault
   const fault = body["soap:Fault"] || body["soapenv:Fault"] || body["S:Fault"];
   if (fault) {
     const faultString = fault.faultstring || fault.Reason || "Error desconocido";
-    throw new Error(`SOAP Fault: ${faultString}`);
+    throw new ArcaSoapError(`SOAP Fault: ${faultString}`);
   }
 
   const responseKey = `${method}Response`;
@@ -125,7 +143,7 @@ export async function wsfeSoapCall(
   const methodResponse = body[responseKey];
 
   if (!methodResponse) {
-    throw new Error(
+    throw new ArcaSoapError(
       `Respuesta del método ${method} no encontrada:\n${responseXml}`
     );
   }

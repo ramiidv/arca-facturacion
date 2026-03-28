@@ -1,0 +1,352 @@
+# @ramiidv/arca-sdk
+
+> TypeScript SDK for ARCA (formerly AFIP) electronic invoicing in Argentina.
+> Wraps WSFEv1 and WSAA SOAP web services.
+
+## What this SDK does
+
+- Authenticates against ARCA's WSAA using X.509 certificates (PKCS#7/CMS signing)
+- Creates electronic invoices (facturas), credit notes, and debit notes via WSFEv1
+- Handles all comprobante types: A, B, C, E, M, and MiPyME FCE
+- Auto-calculates IVA, totals, and comprobante numbers
+- Queries ARCA parameters (document types, IVA rates, currencies, exchange rates, etc.)
+
+## Install
+
+```bash
+npm install @ramiidv/arca-sdk
+```
+
+Requires Node.js >= 18. Uses native `fetch` (no axios/node-fetch dependency).
+
+## Quick start
+
+```typescript
+import fs from "fs";
+import { Arca, CbteTipo, IvaTipo, DocTipo, Moneda } from "@ramiidv/arca-sdk";
+
+const arca = new Arca({
+  cuit: 20123456789,
+  cert: fs.readFileSync("./cert.crt", "utf-8"),
+  key: fs.readFileSync("./key.key", "utf-8"),
+  production: false,
+});
+
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [{ neto: 1000, iva: IvaTipo.IVA_21 }],
+});
+// result: { aprobada: true, cae: "...", cbteNro: 42, importes: { total: 1210, neto: 1000, iva: 210, ... } }
+```
+
+## Architecture
+
+The SDK has two API levels:
+
+1. **Simplified API** (`facturar`, `notaCredito`, `notaDebito`) — auto-calculates IVA, totals, comprobante number, dates. Returns a clean `FacturaResult`.
+2. **Raw API** (`crearFactura`, `crearFacturaAuto`) — maps 1:1 to AFIP's WSFEv1 SOAP methods. Returns raw AFIP XML responses parsed to JS objects.
+
+Internally:
+- `Arca` (main class) — orchestrator, holds config, exposes all methods
+- `WsaaClient` — handles WSAA authentication, token caching with dedup and expiry margin
+- `WsfeClient` — wraps all WSFEv1 SOAP calls
+- `facturacion.ts` — pure functions for IVA/total calculation and invoice building
+- `soap-client.ts` — generic SOAP/XML utilities (fetch with timeout, XML parsing via fast-xml-parser)
+- `errors.ts` — `ArcaAuthError`, `ArcaWSFEError` (with error codes), `ArcaSoapError` (with HTTP status)
+
+## Configuration
+
+```typescript
+new Arca({
+  cuit: number,               // CUIT without hyphens
+  cert: string,               // X.509 certificate PEM content
+  key: string,                // Private key PEM content
+  production?: boolean,       // Default: false (uses homologación/testing endpoints)
+  tokenTTLMinutes?: number,   // Default: 720 (12 hours)
+  requestTimeoutMs?: number,  // Default: 30000 (30 seconds). Uses AbortController.
+})
+```
+
+## Simplified API — facturar()
+
+Automatically: gets next comprobante number, calculates all totals from line items, formats dates in Argentina timezone, defaults to Consumidor Final + Pesos + Productos.
+
+```typescript
+interface FacturarOpts {
+  ptoVta: number;                          // Punto de venta
+  cbteTipo: number;                        // CbteTipo enum
+  items: LineItem[];                       // Line items (see below)
+  concepto?: number;                       // Default: PRODUCTOS. Auto-detects SERVICIOS if `servicio` provided
+  docTipo?: number;                        // Default: DocTipo.CONSUMIDOR_FINAL (99)
+  docNro?: number;                         // Default: 0
+  fecha?: Date | string;                   // Default: today (Argentina timezone). String = "YYYYMMDD"
+  servicio?: { desde, hasta, vtoPago };    // Required for services. Accepts Date or "YYYYMMDD"
+  moneda?: string;                         // Default: "PES"
+  cotizacion?: number;                     // Default: 1
+  tributos?: Tributo[];
+  opcionales?: Opcional[];                 // E.g., CBU for FCE: [{ Id: "2101", Valor: "..." }]
+}
+
+interface LineItem {
+  neto: number;        // Net amount (without IVA)
+  iva?: number;        // IvaTipo enum. If set, item is "gravado" and IVA is calculated
+  exento?: boolean;    // If true, amount goes to ImpOpEx (exempt)
+  // If neither iva nor exento: amount goes to ImpTotConc (no gravado)
+}
+```
+
+**IVA calculation rules:**
+- Items with `iva` set → added to ImpNeto. IVA calculated using IVA_RATES and added to ImpIVA. Grouped by aliquot in the Iva array.
+- Items with `exento: true` → added to ImpOpEx.
+- Items with neither → added to ImpTotConc (no gravado).
+- ImpTotal = ImpNeto + ImpIVA + ImpOpEx + ImpTotConc + ImpTrib.
+- All amounts rounded to 2 decimal places.
+- For CbteTipo C (monotributista): IVA is NOT discriminated. All items go to ImpNeto, ImpIVA = 0.
+
+**Return type:**
+
+```typescript
+interface FacturaResult {
+  aprobada: boolean;
+  cae?: string;
+  caeVencimiento?: string;    // "YYYYMMDD"
+  cbteNro: number;
+  ptoVta: number;
+  cbteTipo: number;
+  importes: {
+    total: number;
+    neto: number;
+    iva: number;
+    exento: number;
+    noGravado: number;
+    tributos: number;
+  };
+  observaciones: { code: number; msg: string }[];
+  raw: FECAESolicitarResult;  // Full AFIP response
+}
+```
+
+## Simplified API — notaCredito() / notaDebito()
+
+Same as `facturar` but with `comprobanteOriginal` instead of `cbteTipo`. The NC/ND type is inferred automatically (FACTURA_B → NOTA_CREDITO_B, etc.).
+
+```typescript
+await arca.notaCredito({
+  ptoVta: 1,
+  comprobanteOriginal: { tipo: CbteTipo.FACTURA_B, ptoVta: 1, nro: 150 },
+  items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+});
+
+await arca.notaDebito({
+  ptoVta: 1,
+  comprobanteOriginal: { tipo: CbteTipo.FACTURA_A, ptoVta: 1, nro: 200, fecha: "20260301" },
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 500, iva: IvaTipo.IVA_21 }],
+});
+```
+
+**Supported CbteTipo mappings:**
+- FACTURA_A (1) → NC_A (3), ND_A (2)
+- FACTURA_B (6) → NC_B (8), ND_B (7)
+- FACTURA_C (11) → NC_C (13), ND_C (12)
+- FACTURA_E (19) → NC_E (21), ND_E (20)
+- FACTURA_M (51) → NC_M (53), ND_M (52)
+- FCE_FACTURA_A (201) → FCE_NC_A (203), FCE_ND_A (202)
+- FCE_FACTURA_B (206) → FCE_NC_B (208), FCE_ND_B (207)
+- FCE_FACTURA_C (211) → FCE_NC_C (213), FCE_ND_C (212)
+
+## Static utilities
+
+```typescript
+// Preview totals without submitting to ARCA
+const { importes, iva } = Arca.calcularTotales(
+  [{ neto: 1000, iva: IvaTipo.IVA_21 }],
+  { tributos: [...], tipoC: false }
+);
+
+// Format date to YYYYMMDD in Argentina timezone
+Arca.formatDate(new Date()); // "20260328"
+Arca.formatDate("20260328"); // passthrough
+
+// Extract CAE from raw result (for raw API users)
+const { approved, cae, caeFchVto, details } = Arca.extractCAE(rawResult);
+```
+
+## Raw API (advanced)
+
+Maps directly to WSFEv1 SOAP methods. No auto-calculation. User must provide all fields.
+
+```typescript
+// Get next number manually
+const nextNum = await arca.siguienteComprobante(1, CbteTipo.FACTURA_B);
+
+// Create invoice with full control
+const rawResult = await arca.crearFactura({
+  PtoVta: 1,
+  CbteTipo: CbteTipo.FACTURA_B,
+  invoices: [{
+    Concepto: 1, DocTipo: 99, DocNro: 0,
+    CbteDesde: nextNum, CbteHasta: nextNum,
+    CbteFch: "20260328",
+    ImpTotal: 121, ImpTotConc: 0, ImpNeto: 100,
+    ImpOpEx: 0, ImpTrib: 0, ImpIVA: 21,
+    MonId: "PES", MonCotiz: 1,
+    Iva: [{ Id: 5, BaseImp: 100, Importe: 21 }],
+  }],
+});
+
+// Or with auto-numbering (still no auto-calc)
+const rawResult2 = await arca.crearFacturaAuto(1, CbteTipo.FACTURA_B, { ...invoiceDetail });
+```
+
+## Query methods
+
+```typescript
+await arca.serverStatus();                          // { AppServer, DbServer, AuthServer }
+await arca.ultimoComprobante(ptoVta, cbteTipo);     // number
+await arca.consultarComprobante(cbteTipo, ptoVta, cbteNro);
+await arca.getPuntosVenta();
+await arca.getCotizacion(Moneda.DOLARES);           // { MonId, MonCotiz, FchCotiz }
+await arca.getTiposComprobante();
+await arca.getTiposConcepto();
+await arca.getTiposDocumento();
+await arca.getTiposIva();
+await arca.getMonedas();
+await arca.getTiposTributo();
+await arca.getTiposOpcional();
+await arca.getCantMaxRegistros();
+```
+
+## Error handling
+
+```typescript
+import { ArcaAuthError, ArcaWSFEError, ArcaSoapError } from "@ramiidv/arca-sdk";
+
+try {
+  await arca.facturar({ ... });
+} catch (e) {
+  if (e instanceof ArcaAuthError) {
+    // WSAA login failed (bad cert, expired, etc.)
+    arca.clearAuthCache();
+  }
+  if (e instanceof ArcaWSFEError) {
+    // AFIP business error with codes
+    e.errors; // { code: number, msg: string }[]
+  }
+  if (e instanceof ArcaSoapError) {
+    // HTTP/SOAP transport error (timeout, 500, SOAP fault)
+    e.statusCode; // number | undefined
+  }
+}
+```
+
+All error classes extend `ArcaError` which extends `Error`.
+
+## Enums reference
+
+```typescript
+// Comprobante types
+CbteTipo.FACTURA_A    // 1
+CbteTipo.FACTURA_B    // 6
+CbteTipo.FACTURA_C    // 11
+CbteTipo.FACTURA_E    // 19   (export)
+CbteTipo.FCE_FACTURA_A // 201 (MiPyME)
+// ... and NOTA_DEBITO_*, NOTA_CREDITO_*, RECIBO_* variants
+
+// Concepto
+Concepto.PRODUCTOS              // 1
+Concepto.SERVICIOS              // 2
+Concepto.PRODUCTOS_Y_SERVICIOS  // 3
+
+// Document types
+DocTipo.CUIT              // 80
+DocTipo.DNI               // 96
+DocTipo.CONSUMIDOR_FINAL  // 99
+// ... CUIL (86), CDI (87), Pasaporte (94), etc.
+
+// IVA rates
+IvaTipo.IVA_0     // 3  → 0%
+IvaTipo.IVA_2_5   // 9  → 2.5%
+IvaTipo.IVA_5     // 8  → 5%
+IvaTipo.IVA_10_5  // 4  → 10.5%
+IvaTipo.IVA_21    // 5  → 21%
+IvaTipo.IVA_27    // 6  → 27%
+
+// IVA_RATES maps IvaTipo to percentage: IVA_RATES[IvaTipo.IVA_21] === 21
+
+// Currency
+Moneda.PESOS    // "PES"
+Moneda.DOLARES  // "DOL"
+Moneda.EUROS    // "060"
+// ... and more
+
+// Tributo types
+TributoTipo.IIBB        // 5
+TributoTipo.PERCEP_IVA  // 6
+// ... and more
+```
+
+## Common patterns
+
+### Service invoice with tributos
+
+```typescript
+await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 10000, iva: IvaTipo.IVA_21 }],
+  servicio: {
+    desde: new Date("2026-03-01"),
+    hasta: new Date("2026-03-31"),
+    vtoPago: new Date("2026-04-15"),
+  },
+  tributos: [{
+    Id: TributoTipo.IIBB,
+    Desc: "IIBB CABA",
+    BaseImp: 10000,
+    Alic: 3,
+    Importe: 300,
+  }],
+});
+```
+
+### Batch invoice (raw API, multiple comprobantes)
+
+```typescript
+const result = await arca.crearFactura({
+  PtoVta: 1,
+  CbteTipo: CbteTipo.FACTURA_B,
+  invoices: [invoice1, invoice2, invoice3], // up to getCantMaxRegistros()
+});
+```
+
+### Currency with exchange rate
+
+```typescript
+const cotiz = await arca.getCotizacion(Moneda.DOLARES);
+await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_A,
+  docTipo: DocTipo.CUIT,
+  docNro: 30712345678,
+  items: [{ neto: 1000, iva: IvaTipo.IVA_21 }],
+  moneda: Moneda.DOLARES,
+  cotizacion: cotiz.MonCotiz,
+});
+```
+
+## Key domain concepts
+
+- **CUIT**: Argentine tax ID (11 digits, no hyphens). Used for business identification.
+- **Punto de venta (PtoVta)**: Sales point number (1-99999). Must be pre-registered with ARCA.
+- **CAE**: Código de Autorización Electrónica. Unique code ARCA returns for each approved invoice.
+- **Comprobante**: Generic term for any fiscal document (factura, nota de crédito/débito, recibo).
+- **WSFEv1**: ARCA's SOAP web service for electronic invoicing.
+- **WSAA**: ARCA's authentication web service. Uses CMS/PKCS#7 signed tickets.
+- **Homologación**: ARCA's testing/sandbox environment. Use `production: false`.
+- **FCE MiPyME**: Factura de Crédito Electrónica for small/medium businesses. Requires CBU in opcionales.
+- **Tipo C**: Invoices issued by monotributistas (simplified tax regime). No IVA discrimination.
