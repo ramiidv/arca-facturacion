@@ -398,59 +398,111 @@ const url = Arca.generateQRUrl({
 
 ## WSFEX (Export invoices)
 
-For export invoices (`Factura E`, `Nota de Crédito E`, etc.). Uses a separate ARCA web service (WSFEX) with different endpoints and schema.
+Simplified API (`facturarExpo`) auto-handles ID, numbering, and item total calculation:
 
 ```typescript
-// Get next ID and number
-const nextId = (await arca.ultimoIdExpo()) + 1;
-const nextNum = await arca.siguienteComprobanteExpo(1, CbteTipo.FACTURA_E);
-
-// Authorize export invoice
-const result = await arca.crearFacturaExportacion({
-  Id: nextId,
-  Cbte_Tipo: CbteTipo.FACTURA_E,
-  Fecha_cbte: "20260328",
-  Punto_vta: 1,
-  Cbte_nro: nextNum,
-  Tipo_expo: 1,  // 1=Bienes, 2=Servicios, 4=Otros
-  Permiso_existente: "N",
-  Dst_cmp: 203,  // Country code (203 = USA)
-  Cliente: "ACME Corp",
-  Cuit_pais_cliente: 50000000016,  // CUIT del país
-  Domicilio_cliente: "123 Main St, NY",
-  Id_impositivo: "12-3456789",
-  Moneda_Id: "DOL",
-  Moneda_ctz: 1200,
-  Idioma_cbte: 2,  // 1=ES, 2=EN, 3=PT
-  Forma_pago: "Wire Transfer",
-  Incoterms: "FOB",
-  Items: [{
-    Pro_codigo: "SKU001",
-    Pro_ds: "Widget",
-    Pro_qty: 100,
-    Pro_umed: 7,  // Unit of measure code
-    Pro_precio_uni: 10,
-    Pro_bonificacion: 0,
-    Pro_total_item: 1000,
+const result = await arca.facturarExpo({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_E,
+  tipoExpo: 1,  // 1=Bienes, 2=Servicios, 4=Otros
+  pais: 203,    // Country code (203 = USA)
+  cliente: {
+    nombre: "ACME Corp",
+    cuitPais: 50000000016,
+    domicilio: "123 Main St, NY",
+    idImpositivo: "12-3456789",
+  },
+  moneda: "DOL",
+  cotizacion: 1200,
+  formaPago: "Wire Transfer",
+  incoterms: "FOB",
+  idioma: 2,  // 1=ES, 2=EN, 3=PT
+  items: [{
+    codigo: "SKU001",
+    descripcion: "Widget",
+    cantidad: 100,
+    unidad: 7,
+    precioUnitario: 10,
+    // Pro_total_item auto-calculated: 100 * 10 = 1000
   }],
 });
 
-if (result.FEXResultAuth?.Resultado === "A") {
-  console.log("CAE:", result.FEXResultAuth.Cae);
+if (result.aprobada) {
+  console.log("CAE:", result.cae);
+  console.log("Cbte:", result.cbteNro);
 }
+```
 
-// Query methods
-await arca.consultarComprobanteExpo(CbteTipo.FACTURA_E, 1, nextNum);
+Returns `FacturaExpoResult`: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `ptoVta`, `cbteTipo`, `obs`, `raw`.
+
+Raw API also available via `crearFacturaExportacion(invoice)` for full control.
+
+Query methods:
+```typescript
+await arca.consultarComprobanteExpo(CbteTipo.FACTURA_E, 1, cbteNro);
 await arca.serverStatusExpo();
-await arca.getPaisesExpo();
-await arca.getIncotermsExpo();
-await arca.getUMedExpo();
-await arca.getTiposExpo();
+await arca.getPaisesExpo();    // Country codes
+await arca.getIncotermsExpo(); // Incoterms
+await arca.getUMedExpo();      // Units of measure
+await arca.getTiposExpo();     // Export types
 await arca.getMonedasExpo();
 await arca.getIdiomasExpo();
 await arca.getCuitsPaisExpo();
 await arca.getTiposCbteExpo();
 ```
+
+## CAEA (offline/contingency invoicing)
+
+CAEA (Código de Autorización Electrónico Anticipado) allows issuing invoices offline and reporting them later.
+
+Flow:
+1. Request CAEA for a period (before it starts)
+2. Issue invoices offline using the CAEA
+3. Report invoices to ARCA
+4. If no invoices were issued, report "sin movimiento"
+
+```typescript
+// 1. Request CAEA (must be done 5+ days before the period starts)
+const caea = await arca.solicitarCAEA("202604", 1); // April, 1st half
+// caea: { CAEA, Periodo, Orden, FchVigDesde, FchVigHasta, FchTopeInf }
+
+// 2. Register invoices with CAEA (same interface as facturar()!)
+const result = await arca.registrarFacturaCAEA(caea.CAEA, {
+  ptoVta: 5,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+});
+// Returns FacturaResult — same as facturar()
+
+// 3. If no invoices in the period, report no movement
+await arca.sinMovimientoCAEA(caea.CAEA, 5);
+
+// Query existing CAEA
+const existing = await arca.consultarCAEA("202604", 1);
+
+// Raw API also available: registrarCAEA(request) for full control
+```
+
+## Padrón (taxpayer registry)
+
+Look up taxpayer data by CUIT. Two service levels:
+
+```typescript
+// Basic lookup (A13) — works with standard cert
+const persona = await arca.consultarCuit(30712345678);
+persona.cuit;         // 30712345678
+persona.nombre;       // "EMPRESA SA"
+persona.tipoPersona;  // "JURIDICA"
+persona.estadoClave;  // "ACTIVO"
+persona.impuestos;    // [{ id: 30, descripcion: "IVA", estado: "AC" }]
+persona.raw;          // full parsed AFIP response
+
+// Detailed lookup (A5) — requires additional cert authorization
+const detalle = await arca.consultarCuitDetalle(20123456789);
+detalle.domicilioFiscal; // { direccion, localidad, codPostal }
+```
+
+Returns `Contribuyente`: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `domicilioFiscal?`, `impuestos?`, `raw`.
 
 ## Key domain concepts
 
@@ -464,3 +516,5 @@ await arca.getTiposCbteExpo();
 - **FCE MiPyME**: Factura de Crédito Electrónica for small/medium businesses. Requires CBU in opcionales.
 - **Tipo C**: Invoices issued by monotributistas (simplified tax regime). No IVA discrimination.
 - **WSFEX**: ARCA's web service for export invoices. Separate from WSFEv1, different schema.
+- **CAEA**: Código de Autorización Electrónico Anticipado. Pre-authorized code for offline invoicing. Must be requested before the period starts.
+- **Padrón A13/A5**: ARCA's taxpayer registry web services. A13 = basic info (name, status, taxes). A5 = detailed (includes address, activities). Requires separate WSAA authorization.

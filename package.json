@@ -1,6 +1,6 @@
 {
   "name": "@ramiidv/arca-sdk",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "SDK para interactuar con los Web Services de ARCA (ex AFIP) - Facturación Electrónica Argentina",
   "type": "module",
   "main": "dist/index.js",

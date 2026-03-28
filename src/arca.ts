@@ -445,6 +445,38 @@ export class Arca {
     return this.wsfe.registrarCAEA(auth, request);
   }
 
+  /**
+   * Registra una factura emitida con CAEA (API simplificada).
+   * Equivale a `facturar()` pero usando un CAEA pre-solicitado.
+   * Calcula automáticamente IVA, totales, y número de comprobante.
+   *
+   * @example
+   * ```ts
+   * const caea = await arca.solicitarCAEA("202604", 1);
+   *
+   * const result = await arca.registrarFacturaCAEA(caea.CAEA, {
+   *   ptoVta: 1,
+   *   cbteTipo: CbteTipo.FACTURA_B,
+   *   items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+   * });
+   * ```
+   */
+  async registrarFacturaCAEA(
+    caea: string,
+    opts: FacturarOpts
+  ): Promise<FacturaResult> {
+    const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
+    const { detail, importes } = buildInvoiceDetail(opts, nextNum);
+
+    const result = await this.registrarCAEA({
+      PtoVta: opts.ptoVta,
+      CbteTipo: opts.cbteTipo,
+      invoices: [{ ...detail, CAEA: caea }],
+    });
+
+    return parseFacturaResult(result, importes);
+  }
+
   /** Informa que no hubo movimientos para un CAEA en un punto de venta. */
   async sinMovimientoCAEA(
     caea: string,

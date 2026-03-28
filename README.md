@@ -181,42 +181,73 @@ const result = await arca.facturar({
 
 ### Factura de exportación (WSFEX)
 
-```typescript
-const nextId = (await arca.ultimoIdExpo()) + 1;
-const nextNum = await arca.siguienteComprobanteExpo(1, CbteTipo.FACTURA_E);
+ID, número de comprobante y total por item se calculan automáticamente.
 
-const result = await arca.crearFacturaExportacion({
-  Id: nextId,
-  Cbte_Tipo: CbteTipo.FACTURA_E,
-  Fecha_cbte: Arca.formatDate(new Date()),
-  Punto_vta: 1,
-  Cbte_nro: nextNum,
-  Tipo_expo: 1, // 1=Bienes, 2=Servicios, 4=Otros
-  Permiso_existente: "N",
-  Dst_cmp: 203, // País destino (203 = Estados Unidos)
-  Cliente: "ACME Corp",
-  Cuit_pais_cliente: 50000000016,
-  Domicilio_cliente: "123 Main St, New York",
-  Id_impositivo: "12-3456789",
-  Moneda_Id: "DOL",
-  Moneda_ctz: 1200,
-  Idioma_cbte: 2, // 1=Español, 2=Inglés, 3=Portugués
-  Forma_pago: "Wire Transfer",
-  Incoterms: "FOB",
-  Items: [{
-    Pro_codigo: "SKU001",
-    Pro_ds: "Widget",
-    Pro_qty: 100,
-    Pro_umed: 7,
-    Pro_precio_uni: 10,
-    Pro_bonificacion: 0,
-    Pro_total_item: 1000,
+```typescript
+const result = await arca.facturarExpo({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_E,
+  tipoExpo: 1, // 1=Bienes, 2=Servicios, 4=Otros
+  pais: 203,   // País destino (203 = Estados Unidos)
+  cliente: {
+    nombre: "ACME Corp",
+    cuitPais: 50000000016,
+    domicilio: "123 Main St, New York",
+    idImpositivo: "12-3456789",
+  },
+  moneda: "DOL",
+  cotizacion: 1200,
+  formaPago: "Wire Transfer",
+  incoterms: "FOB",
+  idioma: 2, // 1=Español, 2=Inglés, 3=Portugués
+  items: [{
+    codigo: "SKU001",
+    descripcion: "Widget",
+    cantidad: 100,
+    unidad: 7,
+    precioUnitario: 10,
   }],
 });
 
-if (result.FEXResultAuth?.Resultado === "A") {
-  console.log(`CAE: ${result.FEXResultAuth.Cae}`);
+if (result.aprobada) {
+  console.log(`CAE: ${result.cae}, Cbte #${result.cbteNro}`);
 }
+```
+
+### Consultar contribuyente (Padrón)
+
+```typescript
+// Consulta básica por CUIT (padrón A13)
+const persona = await arca.consultarCuit(30712345678);
+console.log(persona.nombre);       // "EMPRESA SA"
+console.log(persona.tipoPersona);  // "JURIDICA"
+console.log(persona.estadoClave);  // "ACTIVO"
+console.log(persona.impuestos);    // [{ id: 30, descripcion: "IVA", estado: "AC" }]
+
+// Consulta detallada (padrón A5 — requiere autorización adicional)
+const detalle = await arca.consultarCuitDetalle(20123456789);
+console.log(detalle.domicilioFiscal); // { direccion, localidad, codPostal }
+```
+
+### CAEA — Facturación offline / contingencia
+
+```typescript
+// 1. Solicitar CAEA para un período (antes de que empiece)
+const caea = await arca.solicitarCAEA("202604", 1); // abril, 1ra quincena
+console.log(`CAEA: ${caea.CAEA}, vigencia: ${caea.FchVigDesde} - ${caea.FchVigHasta}`);
+
+// 2. Emitir facturas offline usando el CAEA (misma interfaz que facturar())
+const result = await arca.registrarFacturaCAEA(caea.CAEA, {
+  ptoVta: 5,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+});
+
+// 3. Si no hubo movimientos en el período
+await arca.sinMovimientoCAEA(caea.CAEA, 5);
+
+// Consultar un CAEA existente
+const existente = await arca.consultarCAEA("202604", 1);
 ```
 
 ### Previsualizar totales sin enviar
@@ -408,8 +439,10 @@ const maxRegs = await arca.getCantMaxRegistros();
 | `facturar(opts)` | Crea un comprobante con cálculo automático de IVA y totales |
 | `notaCredito(opts)` | Crea nota de crédito asociada (tipo NC inferido automáticamente) |
 | `notaDebito(opts)` | Crea nota de débito asociada (tipo ND inferido automáticamente) |
+| `facturarExpo(opts)` | Factura de exportación con auto ID, numeración y cálculo de totales |
+| `registrarFacturaCAEA(caea, opts)` | Registra factura con CAEA (misma interfaz que `facturar()`) |
 
-Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `importes`, `observaciones`, `raw`.
+Retornan `FacturaResult` / `FacturaExpoResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `importes`/`obs`, `raw`.
 
 ### Facturación — API raw
 
@@ -425,7 +458,8 @@ Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `i
 
 | Método | Descripción |
 | --- | --- |
-| `crearFacturaExportacion(invoice)` | Autoriza un comprobante de exportación |
+| `facturarExpo(opts)` | Factura de exportación simplificada (auto ID y numeración) |
+| `crearFacturaExportacion(invoice)` | Autoriza un comprobante de exportación (API raw) |
 | `ultimoComprobanteExpo(ptoVta, cbteTipo)` | Último número autorizado (WSFEX) |
 | `siguienteComprobanteExpo(ptoVta, cbteTipo)` | Siguiente número (WSFEX) |
 | `ultimoIdExpo()` | Último ID de request WSFEX |
@@ -439,6 +473,25 @@ Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `i
 | `getUMedExpo()` | Unidades de medida |
 | `getTiposExpo()` | Tipos de exportación |
 | `getCuitsPaisExpo()` | CUITs de países |
+
+### CAEA (Autorización Anticipada)
+
+| Método | Descripción |
+| --- | --- |
+| `solicitarCAEA(periodo, orden)` | Solicita un CAEA para un período y quincena |
+| `consultarCAEA(periodo, orden)` | Consulta un CAEA existente |
+| `registrarFacturaCAEA(caea, opts)` | Registra factura con CAEA (API simplificada) |
+| `registrarCAEA(request)` | Informa comprobantes con CAEA (API raw) |
+| `sinMovimientoCAEA(caea, ptoVta)` | Informa sin movimientos para un CAEA |
+
+### Padrón (Consulta de contribuyentes)
+
+| Método | Descripción |
+| --- | --- |
+| `consultarCuit(cuit)` | Datos básicos de un contribuyente (padrón A13) |
+| `consultarCuitDetalle(cuit)` | Datos detallados con domicilio (padrón A5) |
+
+Retornan `Contribuyente` con: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `domicilioFiscal?`, `impuestos?`, `raw`.
 
 ### Parámetros WSFE
 
@@ -468,7 +521,7 @@ Retornan `FacturaResult` con: `aprobada`, `cae`, `caeVencimiento`, `cbteNro`, `i
 | Método | Descripción |
 | --- | --- |
 | `Arca.calcularTotales(items, opts?)` | Calcula importes e IVA sin enviar a ARCA |
-| `Arca.generateQRUrl(input)` | Genera la URL del QR oficial de AFIP |
+| `Arca.generateQRUrl(input)` | Genera la URL del QR oficial de ARCA |
 | `Arca.extractCAE(result)` | Extrae CAE del resultado raw |
 | `Arca.formatDate(date)` | Formatea `Date` a `YYYYMMDD` (timezone Argentina) |
 
@@ -521,10 +574,10 @@ Tambien se incluyen tipos especiales: `COMPRA_BIENES_USADOS` (49), `CTA_VTA_LIQ_
 
 ## Entornos
 
-| Entorno | WSAA | WSFE | WSFEX |
-| --- | --- | --- | --- |
-| Testing | `wsaahomo.afip.gov.ar` | `wswhomo.afip.gov.ar` | `wswhomo.afip.gov.ar` |
-| Producción | `wsaa.afip.gov.ar` | `servicios1.afip.gov.ar` | `servicios1.afip.gov.ar` |
+| Entorno | WSAA | WSFE | WSFEX | Padrón |
+| --- | --- | --- | --- | --- |
+| Testing | `wsaahomo.afip.gov.ar` | `wswhomo.afip.gov.ar` | `wswhomo.afip.gov.ar` | `awshomo.afip.gov.ar` |
+| Producción | `wsaa.afip.gov.ar` | `servicios1.afip.gov.ar` | `servicios1.afip.gov.ar` | `aws.afip.gov.ar` |
 
 ## Licencia
 
