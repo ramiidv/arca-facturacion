@@ -15,6 +15,12 @@ export interface ArcaConfig {
   tokenTTLMinutes?: number;
   /** Timeout para requests HTTP en milisegundos (default: 30000 = 30 segundos) */
   requestTimeoutMs?: number;
+  /** Cantidad de reintentos en caso de error transitorio (default: 1) */
+  retries?: number;
+  /** Delay inicial entre reintentos en milisegundos, se duplica con cada intento (default: 1000) */
+  retryDelayMs?: number;
+  /** Callback para eventos del SDK (auth, requests, retries). Para logging/debugging. */
+  onEvent?: (event: ArcaEvent) => void;
 }
 
 // ============================================================
@@ -247,6 +253,194 @@ export interface CotizacionResult {
   MonCotiz: number;
   FchCotiz: string;
   Errors?: { Err: WsError | WsError[] };
+}
+
+// ============================================================
+// Eventos / Logging
+// ============================================================
+
+export type ArcaEvent =
+  | { type: "auth:login"; service: string; durationMs: number }
+  | { type: "auth:cache-hit"; service: string }
+  | { type: "request:start"; method: string; endpoint: string }
+  | { type: "request:end"; method: string; durationMs: number }
+  | { type: "request:retry"; method: string; attempt: number; delayMs: number; error: string }
+  | { type: "request:error"; method: string; error: string };
+
+// ============================================================
+// QR
+// ============================================================
+
+export interface QRInput {
+  /** Fecha del comprobante (YYYY-MM-DD) */
+  fecha: string;
+  /** CUIT del emisor */
+  cuit: number;
+  /** Punto de venta */
+  ptoVta: number;
+  /** Tipo de comprobante */
+  tipoCmp: number;
+  /** Número de comprobante */
+  nroCmp: number;
+  /** Importe total */
+  importe: number;
+  /** Código de moneda */
+  moneda: string;
+  /** Cotización */
+  ctz: number;
+  /** Tipo de documento del receptor */
+  tipoDocRec: number;
+  /** Número de documento del receptor */
+  nroDocRec: number;
+  /** Tipo de código de autorización: "E" = CAE, "A" = CAEA */
+  tipoCodAut?: "E" | "A";
+  /** Código de autorización (CAE) */
+  codAut: number;
+}
+
+// ============================================================
+// WSFEX - Factura de Exportación
+// ============================================================
+
+export interface WsfexItem {
+  /** Código del producto */
+  Pro_codigo: string;
+  /** Descripción del producto */
+  Pro_ds: string;
+  /** Cantidad */
+  Pro_qty: number;
+  /** Unidad de medida (código AFIP) */
+  Pro_umed: number;
+  /** Precio unitario */
+  Pro_precio_uni: number;
+  /** Bonificación / descuento */
+  Pro_bonificacion: number;
+  /** Total del item */
+  Pro_total_item: number;
+}
+
+export interface WsfexPermiso {
+  /** Número de permiso de embarque */
+  Id_permiso: string;
+  /** País destino de la mercadería */
+  Dst_merc: number;
+}
+
+export interface WsfexCmpAsoc {
+  /** Tipo de comprobante asociado */
+  Cbte_tipo: number;
+  /** Punto de venta del comprobante asociado */
+  Cbte_punto_vta: number;
+  /** Número del comprobante asociado */
+  Cbte_nro: number;
+  /** CUIT del emisor del comprobante asociado */
+  Cbte_cuit: number;
+}
+
+export interface WsfexInvoice {
+  /** ID único del request (usar getLastId + 1) */
+  Id: number;
+  /** Tipo de comprobante (19=Factura E, 20=ND E, 21=NC E) */
+  Cbte_Tipo: number;
+  /** Fecha del comprobante (YYYYMMDD) */
+  Fecha_cbte: string;
+  /** Punto de venta */
+  Punto_vta: number;
+  /** Número de comprobante */
+  Cbte_nro: number;
+  /** Tipo de exportación: 1=Bienes, 2=Servicios, 4=Otros */
+  Tipo_expo: number;
+  /** Permiso de embarque existente: "S", "N", o "" */
+  Permiso_existente: string;
+  /** Código de país destino */
+  Dst_cmp: number;
+  /** Nombre del cliente */
+  Cliente: string;
+  /** CUIT del país del cliente */
+  Cuit_pais_cliente: number;
+  /** Domicilio del cliente */
+  Domicilio_cliente: string;
+  /** ID impositivo del cliente extranjero */
+  Id_impositivo: string;
+  /** Código de moneda */
+  Moneda_Id: string;
+  /** Cotización de la moneda */
+  Moneda_ctz: number;
+  /** Observaciones comerciales */
+  Obs_comerciales?: string;
+  /** Observaciones */
+  Obs?: string;
+  /** Idioma: 1=Español, 2=Inglés, 3=Portugués */
+  Idioma_cbte: number;
+  /** Forma de pago */
+  Forma_pago: string;
+  /** Código Incoterms */
+  Incoterms?: string;
+  /** Descripción Incoterms */
+  Incoterms_Ds?: string;
+  /** Items del comprobante */
+  Items: WsfexItem[];
+  /** Permisos de embarque */
+  Permisos?: WsfexPermiso[];
+  /** Comprobantes asociados */
+  Cmps_asoc?: WsfexCmpAsoc[];
+}
+
+export interface WsfexAuthResult {
+  FEXResultAuth?: {
+    Id: number;
+    Cuit: number;
+    Cbte_nro: number;
+    Cbte_tipo: number;
+    Punto_vta: number;
+    Resultado: "A" | "R";
+    Cae: string;
+    Fch_cbte: string;
+    Fch_venc_Cae: string;
+    Reproceso: string;
+    Obs?: string;
+  };
+  FEXErr?: { ErrCode: number; ErrMsg: string };
+  FEXEvents?: { EventCode: number; EventMsg: string };
+}
+
+export interface WsfexLastCmpResult {
+  FEXResult_LastCMP?: {
+    Cbte_nro: number;
+    Cbte_tipo: number;
+    Punto_vta: number;
+  };
+  FEXErr?: { ErrCode: number; ErrMsg: string };
+}
+
+export interface WsfexLastIdResult {
+  FEXResultGet?: { Id: number };
+  FEXErr?: { ErrCode: number; ErrMsg: string };
+}
+
+export interface WsfexGetCmpResult {
+  FEXResultGet?: {
+    Id: number;
+    Cbte_nro: number;
+    Cbte_tipo: number;
+    Punto_vta: number;
+    Fecha_cbte: string;
+    Tipo_expo: number;
+    Dst_cmp: number;
+    Cliente: string;
+    Moneda_Id: string;
+    Moneda_ctz: number;
+    Resultado: "A" | "R";
+    Cae: string;
+    Fch_venc_Cae: string;
+    Obs?: string;
+  };
+  FEXErr?: { ErrCode: number; ErrMsg: string };
+}
+
+export interface WsfexParamItem {
+  Id: number | string;
+  Ds: string;
 }
 
 // ============================================================

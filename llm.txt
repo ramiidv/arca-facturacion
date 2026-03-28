@@ -1,7 +1,7 @@
 # @ramiidv/arca-sdk
 
 > TypeScript SDK for ARCA (formerly AFIP) electronic invoicing in Argentina.
-> Wraps WSFEv1 and WSAA SOAP web services.
+> Wraps WSFEv1, WSFEX, and WSAA SOAP web services.
 
 ## What this SDK does
 
@@ -10,6 +10,10 @@
 - Handles all comprobante types: A, B, C, E, M, and MiPyME FCE
 - Auto-calculates IVA, totals, and comprobante numbers
 - Queries ARCA parameters (document types, IVA rates, currencies, exchange rates, etc.)
+- Export invoices via WSFEX (Factura de Exportación)
+- Retry with exponential backoff on transient errors
+- Event system for logging/debugging (auth, requests, retries)
+- QR code URL generation for printed invoices
 
 ## Install
 
@@ -65,6 +69,9 @@ new Arca({
   production?: boolean,       // Default: false (uses homologación/testing endpoints)
   tokenTTLMinutes?: number,   // Default: 720 (12 hours)
   requestTimeoutMs?: number,  // Default: 30000 (30 seconds). Uses AbortController.
+  retries?: number,           // Default: 1. Retries on transient errors (timeout, 5xx).
+  retryDelayMs?: number,      // Default: 1000. Exponential backoff: delay * 2^attempt.
+  onEvent?: (event: ArcaEvent) => void, // Callback for all SDK events
 })
 ```
 
@@ -339,6 +346,112 @@ await arca.facturar({
 });
 ```
 
+## Events / Logging
+
+Two ways to subscribe:
+
+```typescript
+// 1. Config callback (receives all events)
+const arca = new Arca({
+  ...,
+  onEvent: (e) => console.log(e.type, e),
+});
+
+// 2. Typed .on()/.off() (filter by event type)
+arca.on("request:end", (e) => console.log(`${e.method} took ${e.durationMs}ms`));
+arca.on("auth:login", (e) => console.log(`Login ${e.service} in ${e.durationMs}ms`));
+arca.on("request:retry", (e) => console.warn(`Retry #${e.attempt}: ${e.error}`));
+```
+
+Event types (discriminated union `ArcaEvent`):
+- `auth:login` — new token obtained. Fields: `service`, `durationMs`
+- `auth:cache-hit` — cached token reused. Fields: `service`
+- `request:start` — SOAP call starting. Fields: `method`, `endpoint`
+- `request:end` — SOAP call completed. Fields: `method`, `durationMs`
+- `request:retry` — retrying after error. Fields: `method`, `attempt`, `delayMs`, `error`
+- `request:error` — request failed. Fields: `method`, `error`
+
+## Retry
+
+Enabled by default (`retries: 1`). Only retries on transient errors (timeout, 5xx, network). Does NOT retry on 4xx or business errors. Exponential backoff: `retryDelayMs * 2^attempt`.
+
+## QR Code URL
+
+ARCA requires a QR code on printed invoices. `generateQRUrl` produces the official URL:
+
+```typescript
+const url = Arca.generateQRUrl({
+  fecha: "2026-03-28",    // YYYY-MM-DD
+  cuit: 20123456789,
+  ptoVta: 1,
+  tipoCmp: CbteTipo.FACTURA_B,
+  nroCmp: 150,
+  importe: 121,
+  moneda: "PES",
+  ctz: 1,
+  tipoDocRec: DocTipo.CONSUMIDOR_FINAL,
+  nroDocRec: 0,
+  codAut: 73429843294823,  // CAE number
+});
+// → "https://www.afip.gob.ar/fe/qr/?p=<base64>"
+```
+
+## WSFEX (Export invoices)
+
+For export invoices (`Factura E`, `Nota de Crédito E`, etc.). Uses a separate ARCA web service (WSFEX) with different endpoints and schema.
+
+```typescript
+// Get next ID and number
+const nextId = (await arca.ultimoIdExpo()) + 1;
+const nextNum = await arca.siguienteComprobanteExpo(1, CbteTipo.FACTURA_E);
+
+// Authorize export invoice
+const result = await arca.crearFacturaExportacion({
+  Id: nextId,
+  Cbte_Tipo: CbteTipo.FACTURA_E,
+  Fecha_cbte: "20260328",
+  Punto_vta: 1,
+  Cbte_nro: nextNum,
+  Tipo_expo: 1,  // 1=Bienes, 2=Servicios, 4=Otros
+  Permiso_existente: "N",
+  Dst_cmp: 203,  // Country code (203 = USA)
+  Cliente: "ACME Corp",
+  Cuit_pais_cliente: 50000000016,  // CUIT del país
+  Domicilio_cliente: "123 Main St, NY",
+  Id_impositivo: "12-3456789",
+  Moneda_Id: "DOL",
+  Moneda_ctz: 1200,
+  Idioma_cbte: 2,  // 1=ES, 2=EN, 3=PT
+  Forma_pago: "Wire Transfer",
+  Incoterms: "FOB",
+  Items: [{
+    Pro_codigo: "SKU001",
+    Pro_ds: "Widget",
+    Pro_qty: 100,
+    Pro_umed: 7,  // Unit of measure code
+    Pro_precio_uni: 10,
+    Pro_bonificacion: 0,
+    Pro_total_item: 1000,
+  }],
+});
+
+if (result.FEXResultAuth?.Resultado === "A") {
+  console.log("CAE:", result.FEXResultAuth.Cae);
+}
+
+// Query methods
+await arca.consultarComprobanteExpo(CbteTipo.FACTURA_E, 1, nextNum);
+await arca.serverStatusExpo();
+await arca.getPaisesExpo();
+await arca.getIncotermsExpo();
+await arca.getUMedExpo();
+await arca.getTiposExpo();
+await arca.getMonedasExpo();
+await arca.getIdiomasExpo();
+await arca.getCuitsPaisExpo();
+await arca.getTiposCbteExpo();
+```
+
 ## Key domain concepts
 
 - **CUIT**: Argentine tax ID (11 digits, no hyphens). Used for business identification.
@@ -350,3 +463,4 @@ await arca.facturar({
 - **Homologación**: ARCA's testing/sandbox environment. Use `production: false`.
 - **FCE MiPyME**: Factura de Crédito Electrónica for small/medium businesses. Requires CBU in opcionales.
 - **Tipo C**: Invoices issued by monotributistas (simplified tax regime). No IVA discrimination.
+- **WSFEX**: ARCA's web service for export invoices. Separate from WSFEv1, different schema.

@@ -1,5 +1,6 @@
-import { ENDPOINTS } from "./constants.js";
-import { wsfeSoapCall } from "./soap-client.js";
+import { ENDPOINTS, WSFE_NAMESPACE } from "./constants.js";
+import { afipSoapCall } from "./soap-client.js";
+import type { SoapOptions } from "./soap-client.js";
 import { ArcaWSFEError } from "./errors.js";
 import type {
   WsfeAuth,
@@ -14,6 +15,7 @@ import type {
   PtoVentaItem,
   CotizacionResult,
   WsError,
+  ArcaEvent,
 } from "./types.js";
 
 function toArray<T>(val: T | T[] | undefined): T[] {
@@ -35,22 +37,42 @@ function checkErrors(result: WsfeResult): void {
 
 export class WsfeClient {
   private endpoint: string;
-  private timeoutMs: number;
+  private soapOpts: Omit<SoapOptions, "soapAction">;
 
-  constructor(production: boolean, timeoutMs: number = 30_000) {
+  constructor(
+    production: boolean,
+    opts: {
+      timeoutMs?: number;
+      retries?: number;
+      retryDelayMs?: number;
+      onEvent?: (event: ArcaEvent) => void;
+    } = {}
+  ) {
     this.endpoint = production
       ? ENDPOINTS.wsfe.production
       : ENDPOINTS.wsfe.testing;
-    this.timeoutMs = timeoutMs;
+    this.soapOpts = {
+      timeoutMs: opts.timeoutMs,
+      retries: opts.retries,
+      retryDelayMs: opts.retryDelayMs,
+      onEvent: opts.onEvent,
+    };
+  }
+
+  private call(method: string, params: Record<string, any>) {
+    return afipSoapCall(
+      this.endpoint,
+      WSFE_NAMESPACE,
+      method,
+      params,
+      this.soapOpts
+    );
   }
 
   // ============================================================
   // Facturación
   // ============================================================
 
-  /**
-   * Solicita CAE (Código de Autorización Electrónica) para uno o más comprobantes.
-   */
   async solicitarCAE(
     auth: WsfeAuth,
     request: InvoiceRequest
@@ -59,7 +81,7 @@ export class WsfeClient {
       this.buildDetRequest(inv)
     );
 
-    const params = {
+    const result = (await this.call("FECAESolicitar", {
       Auth: auth,
       FeCAEReq: {
         FeCabReq: {
@@ -67,64 +89,38 @@ export class WsfeClient {
           PtoVta: request.PtoVta,
           CbteTipo: request.CbteTipo,
         },
-        FeDetReq: {
-          FECAEDetRequest: detRequests,
-        },
+        FeDetReq: { FECAEDetRequest: detRequests },
       },
-    };
-
-    const result = (await wsfeSoapCall(
-      this.endpoint,
-      "FECAESolicitar",
-      params,
-      this.timeoutMs
-    )) as FECAESolicitarResult;
+    })) as FECAESolicitarResult;
 
     checkErrors(result);
     return result;
   }
 
-  /**
-   * Obtiene el último número de comprobante autorizado para un punto de venta y tipo.
-   */
   async ultimoComprobante(
     auth: WsfeAuth,
     ptoVta: number,
     cbteTipo: number
   ): Promise<number> {
-    const result = (await wsfeSoapCall(
-      this.endpoint,
-      "FECompUltimoAutorizado",
-      {
-        Auth: auth,
-        PtoVta: ptoVta,
-        CbteTipo: cbteTipo,
-      },
-      this.timeoutMs
-    )) as FECompUltimoAutorizadoResult;
-
+    const result = (await this.call("FECompUltimoAutorizado", {
+      Auth: auth,
+      PtoVta: ptoVta,
+      CbteTipo: cbteTipo,
+    })) as FECompUltimoAutorizadoResult;
     checkErrors(result);
     return result.CbteNro;
   }
 
-  /**
-   * Consulta un comprobante previamente autorizado.
-   */
   async consultarComprobante(
     auth: WsfeAuth,
     cbteTipo: number,
     ptoVta: number,
     cbteNro: number
   ): Promise<FECompConsultarResult> {
-    const result = (await wsfeSoapCall(this.endpoint, "FECompConsultar", {
+    const result = (await this.call("FECompConsultar", {
       Auth: auth,
-      FeCompConsReq: {
-        CbteTipo: cbteTipo,
-        CbteNro: cbteNro,
-        PtoVta: ptoVta,
-      },
-    }, this.timeoutMs)) as FECompConsultarResult;
-
+      FeCompConsReq: { CbteTipo: cbteTipo, CbteNro: cbteNro, PtoVta: ptoVta },
+    })) as FECompConsultarResult;
     checkErrors(result);
     return result;
   }
@@ -133,28 +129,16 @@ export class WsfeClient {
   // Parámetros
   // ============================================================
 
-  /**
-   * Verifica el estado de los servidores de ARCA.
-   */
   async serverStatus(): Promise<ServerStatus> {
-    const result = await wsfeSoapCall(this.endpoint, "FEDummy", {}, this.timeoutMs);
-    return result as ServerStatus;
+    return (await this.call("FEDummy", {})) as ServerStatus;
   }
 
-  /**
-   * Obtiene los tipos de comprobante disponibles.
-   */
   private async getParam<T>(
     auth: WsfeAuth,
     method: string,
     itemKey: string
   ): Promise<T[]> {
-    const result = (await wsfeSoapCall(
-      this.endpoint,
-      method,
-      { Auth: auth },
-      this.timeoutMs
-    )) as WsfeResult;
+    const result = (await this.call(method, { Auth: auth })) as WsfeResult;
     checkErrors(result);
     return toArray(result.ResultGet?.[itemKey] as T | T[] | undefined);
   }
@@ -163,64 +147,50 @@ export class WsfeClient {
     return this.getParam(auth, "FEParamGetTiposCbte", "CbteTipo");
   }
 
-  /** Obtiene los tipos de concepto disponibles. */
   async getTiposConcepto(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposConcepto", "ConceptoTipo");
   }
 
-  /** Obtiene los tipos de documento disponibles. */
   async getTiposDocumento(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposDoc", "DocTipo");
   }
 
-  /** Obtiene los tipos de IVA disponibles. */
   async getTiposIva(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposIva", "IvaTipo");
   }
 
-  /** Obtiene las monedas disponibles. */
   async getMonedas(auth: WsfeAuth): Promise<MonedaItem[]> {
     return this.getParam(auth, "FEParamGetTiposMonedas", "Moneda");
   }
 
-  /** Obtiene los tipos de tributo disponibles. */
   async getTiposTributo(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposTributos", "TributoTipo");
   }
 
-  /** Obtiene los tipos de opcionales disponibles. */
   async getTiposOpcional(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposOpcional", "OpcionalTipo");
   }
 
-  /** Obtiene los puntos de venta habilitados. */
   async getPuntosVenta(auth: WsfeAuth): Promise<PtoVentaItem[]> {
     return this.getParam(auth, "FEParamGetPtosVenta", "PtoVenta");
   }
 
-  /** Obtiene la cotización de una moneda. */
   async getCotizacion(
     auth: WsfeAuth,
     monedaId: string
   ): Promise<CotizacionResult> {
-    const result = (await wsfeSoapCall(
-      this.endpoint,
-      "FEParamGetCotizacion",
-      { Auth: auth, MonId: monedaId },
-      this.timeoutMs
-    )) as WsfeResult & CotizacionResult;
+    const result = (await this.call("FEParamGetCotizacion", {
+      Auth: auth,
+      MonId: monedaId,
+    })) as WsfeResult & CotizacionResult;
     checkErrors(result);
     return result;
   }
 
-  /** Obtiene la cantidad máxima de registros por request de FECAESolicitar. */
   async getCantMaxRegistros(auth: WsfeAuth): Promise<number> {
-    const result = (await wsfeSoapCall(
-      this.endpoint,
-      "FECompTotXRequest",
-      { Auth: auth },
-      this.timeoutMs
-    )) as WsfeResult & { RegXReq?: number };
+    const result = (await this.call("FECompTotXRequest", {
+      Auth: auth,
+    })) as WsfeResult & { RegXReq?: number };
     checkErrors(result);
     return result.RegXReq ?? 0;
   }

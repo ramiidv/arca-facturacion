@@ -11,6 +11,7 @@ export {
 // Types
 export type {
   ArcaConfig,
+  ArcaEvent,
   AccessTicket,
   WsfeAuth,
   AlicuotaIva,
@@ -30,7 +31,8 @@ export type {
   PtoVentaItem,
   CotizacionResult,
   WsError,
-  // Simplified API types
+  QRInput,
+  // Simplified API
   LineItem,
   FacturarOpts,
   NotaCreditoOpts,
@@ -38,12 +40,23 @@ export type {
   ComprobanteRef,
   FacturaResult,
   Importes,
+  // WSFEX
+  WsfexInvoice,
+  WsfexItem,
+  WsfexPermiso,
+  WsfexCmpAsoc,
+  WsfexAuthResult,
+  WsfexLastCmpResult,
+  WsfexLastIdResult,
+  WsfexGetCmpResult,
+  WsfexParamItem,
 } from "./types.js";
 
 // Constants / Enums
 export {
   ENDPOINTS,
   WSFE_NAMESPACE,
+  WSFEX_NAMESPACE,
   CbteTipo,
   Concepto,
   DocTipo,
@@ -58,3 +71,4 @@ export {
 // Low-level clients (for advanced usage)
 export { WsaaClient } from "./wsaa.js";
 export { WsfeClient } from "./wsfe.js";
+export { WsfexClient } from "./wsfex.js";

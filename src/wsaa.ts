@@ -1,7 +1,8 @@
 import forge from "node-forge";
 import { ENDPOINTS, WSAA_NAMESPACE } from "./constants.js";
-import type { AccessTicket } from "./types.js";
+import type { AccessTicket, ArcaEvent } from "./types.js";
 import { soapCall, parseXml, buildXml } from "./soap-client.js";
+import type { SoapOptions } from "./soap-client.js";
 import { ArcaAuthError } from "./errors.js";
 
 /** Margen de seguridad antes de considerar un token expirado (2 minutos). */
@@ -14,7 +15,8 @@ export class WsaaClient {
   private tokenTTLMinutes: number;
   private ticketCache: Map<string, AccessTicket> = new Map();
   private pendingLogins: Map<string, Promise<AccessTicket>> = new Map();
-  private timeoutMs: number;
+  private soapOpts: SoapOptions;
+  private onEvent?: (event: ArcaEvent) => void;
 
   constructor(opts: {
     cert: string;
@@ -22,12 +24,22 @@ export class WsaaClient {
     production: boolean;
     tokenTTLMinutes: number;
     timeoutMs: number;
+    retries: number;
+    retryDelayMs: number;
+    onEvent?: (event: ArcaEvent) => void;
   }) {
     this.cert = opts.cert;
     this.key = opts.key;
     this.production = opts.production;
     this.tokenTTLMinutes = opts.tokenTTLMinutes;
-    this.timeoutMs = opts.timeoutMs;
+    this.onEvent = opts.onEvent;
+    this.soapOpts = {
+      soapAction: "loginCms",
+      timeoutMs: opts.timeoutMs,
+      retries: opts.retries,
+      retryDelayMs: opts.retryDelayMs,
+      onEvent: opts.onEvent,
+    };
   }
 
   /**
@@ -37,7 +49,11 @@ export class WsaaClient {
    */
   async getAccessTicket(service: string): Promise<AccessTicket> {
     const cached = this.ticketCache.get(service);
-    if (cached && cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS) {
+    if (
+      cached &&
+      cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS
+    ) {
+      this.onEvent?.({ type: "auth:cache-hit", service });
       return cached;
     }
 
@@ -58,9 +74,16 @@ export class WsaaClient {
   }
 
   private async performLogin(service: string): Promise<AccessTicket> {
+    const start = Date.now();
     const tra = this.createTRA(service);
     const cms = this.signTRA(tra);
-    return this.loginCms(cms);
+    const ticket = await this.loginCms(cms);
+    this.onEvent?.({
+      type: "auth:login",
+      service,
+      durationMs: Date.now() - start,
+    });
+    return ticket;
   }
 
   /**
@@ -142,7 +165,7 @@ export class WsaaClient {
 
     const soapBody = `<loginCms xmlns="${WSAA_NAMESPACE}"><in0>${cmsBase64}</in0></loginCms>`;
 
-    const responseXml = await soapCall(endpoint, soapBody, "loginCms", this.timeoutMs);
+    const responseXml = await soapCall(endpoint, soapBody, this.soapOpts);
 
     const parsed = parseXml(responseXml);
 
@@ -186,7 +209,9 @@ export class WsaaClient {
     const headerExp =
       taXml.loginTicketResponse?.header?.expirationTime ??
       credentials?.expirationTime;
-    const expirationTime = headerExp ? new Date(headerExp) : new Date(Date.now() + this.tokenTTLMinutes * 60_000);
+    const expirationTime = headerExp
+      ? new Date(headerExp)
+      : new Date(Date.now() + this.tokenTTLMinutes * 60_000);
 
     return { token, sign, expirationTime };
   }

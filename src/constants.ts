@@ -11,9 +11,14 @@ export const ENDPOINTS = {
     testing: "https://wswhomo.afip.gov.ar/wsfev1/service.asmx",
     production: "https://servicios1.afip.gov.ar/wsfev1/service.asmx",
   },
+  wsfex: {
+    testing: "https://wswhomo.afip.gov.ar/wsfexv1/service.asmx",
+    production: "https://servicios1.afip.gov.ar/wsfexv1/service.asmx",
+  },
 } as const;
 
 export const WSFE_NAMESPACE = "http://ar.gov.afip.dif.FEV1/";
+export const WSFEX_NAMESPACE = "http://ar.gov.afip.dif.fexv1/";
 export const WSAA_NAMESPACE =
   "http://wsaa.view.sua.dvadac.desein.afip.gov/LoginCMSService";
 
