@@ -1,7 +1,9 @@
 {
   "name": "@ramiidv/arca-sdk",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "SDK para interactuar con los Web Services de ARCA (ex AFIP) - Facturación Electrónica Argentina",
+  "author": "ramiidv",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,40 +14,52 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist",
     "README.md",
     "LICENSE",
-    "llm.txt"
+    "llm.txt",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc",
+    "clean": "rm -rf dist",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "afip",
     "arca",
     "factura-electronica",
+    "facturacion",
     "wsfe",
+    "wsfex",
     "wsaa",
     "argentina",
     "cae",
+    "caea",
     "invoice",
     "factura",
     "mipyme",
     "fce",
     "soap",
-    "tax"
+    "tax",
+    "electronic-invoice",
+    "padron",
+    "exportacion",
+    "qr"
   ],
-  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ramiidv/arca-sdk.git"
+    "url": "git+https://github.com/ramiidv/arca-sdk.git"
   },
-  "homepage": "https://github.com/ramiidv/arca-sdk#readme",
+  "homepage": "https://arca-sdk.dev/",
   "bugs": {
     "url": "https://github.com/ramiidv/arca-sdk/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=18.0.0"
