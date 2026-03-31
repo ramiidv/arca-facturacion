@@ -278,16 +278,16 @@ DocTipo.CONSUMIDOR_FINAL  // 99
 
 // IVA condition of receiver (MANDATORY since April 2026)
 CondicionIva.RESPONSABLE_INSCRIPTO  // 1
-CondicionIva.EXENTO                 // 4
+CondicionIva.EXENTO                 // 4  (IVA Sujeto Exento)
 CondicionIva.CONSUMIDOR_FINAL      // 5  (auto-set when docTipo=99)
 CondicionIva.MONOTRIBUTISTA        // 6
 CondicionIva.NO_CATEGORIZADO       // 7
-CondicionIva.IMPORTADOR_EXTERIOR   // 8
-CondicionIva.PROVEEDOR_EXTERIOR    // 9
-CondicionIva.NO_ALCANZADO          // 10
+CondicionIva.PROVEEDOR_EXTERIOR    // 8
+CondicionIva.CLIENTE_EXTERIOR      // 9
+CondicionIva.IVA_LIBERADO          // 10 (Ley 19.640)
 CondicionIva.MONOTRIBUTO_SOCIAL    // 13
 CondicionIva.IVA_NO_ALCANZADO     // 15
-CondicionIva.IVA_LIBERADO          // 16
+CondicionIva.MONOTRIBUTO_INDEPENDIENTE_PROMOVIDO // 16
 
 // IVA rates
 IvaTipo.IVA_0     // 3  → 0%

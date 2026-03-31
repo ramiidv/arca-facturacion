@@ -506,6 +506,7 @@ Retornan `Contribuyente` con: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `d
 | `getTiposComprobante()` | Lista de tipos de comprobante |
 | `getTiposConcepto()` | Lista de tipos de concepto |
 | `getTiposDocumento()` | Lista de tipos de documento |
+| `getCondicionesIva()` | Condiciones de IVA válidas para el receptor |
 | `getTiposIva()` | Lista de alícuotas de IVA |
 | `getMonedas()` | Lista de monedas |
 | `getTiposTributo()` | Lista de tipos de tributo |

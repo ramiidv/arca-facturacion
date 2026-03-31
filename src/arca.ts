@@ -395,6 +395,9 @@ export class Arca {
     if (opts.obs) invoice.Obs = opts.obs;
     if (opts.permisos) invoice.Permisos = opts.permisos;
     if (opts.cbtesAsoc) invoice.Cmps_asoc = opts.cbtesAsoc;
+    if (opts.fechaPago)
+      invoice.Fecha_pago = toDateString(opts.fechaPago);
+    if (opts.canMisMonExt) invoice.CanMisMonExt = opts.canMisMonExt;
 
     const result = await this.wsfex.authorize(auth, invoice);
     const authResult = result.FEXResultAuth;
@@ -532,6 +535,12 @@ export class Arca {
   async getTiposDocumento(): Promise<ParamItem[]> {
     const auth = await this.getAuth();
     return this.wsfe.getTiposDocumento(auth);
+  }
+
+  /** Obtiene las condiciones de IVA válidas para el receptor. */
+  async getCondicionesIva(): Promise<ParamItem[]> {
+    const auth = await this.getAuth();
+    return this.wsfe.getCondicionesIva(auth);
   }
 
   async getTiposIva(): Promise<ParamItem[]> {

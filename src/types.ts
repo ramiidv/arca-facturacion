@@ -384,12 +384,18 @@ export interface WsfexInvoice {
   Incoterms?: string;
   /** Descripción Incoterms */
   Incoterms_Ds?: string;
+  /** Fecha de pago (YYYYMMDD) */
+  Fecha_pago?: string;
+  /** Cancela en misma moneda extranjera: "S" o "N" */
+  CanMisMonExt?: string;
   /** Items del comprobante */
   Items: WsfexItem[];
   /** Permisos de embarque */
   Permisos?: WsfexPermiso[];
   /** Comprobantes asociados */
   Cmps_asoc?: WsfexCmpAsoc[];
+  /** Datos opcionales */
+  Opcionales?: { Opcional: { Id: string; Valor: string }[] };
 }
 
 export interface WsfexAuthResult {
@@ -573,6 +579,10 @@ export interface FacturarExpoOpts {
   obs?: string;
   /** Fecha del comprobante (Date o string YYYYMMDD). Default: hoy */
   fecha?: Date | string;
+  /** Fecha de pago (Date o string YYYYMMDD) */
+  fechaPago?: Date | string;
+  /** Cancela en misma moneda extranjera: "S" o "N" */
+  canMisMonExt?: string;
 }
 
 export interface FacturaExpoResult {

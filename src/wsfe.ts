@@ -158,6 +158,10 @@ export class WsfeClient {
     return this.getParam(auth, "FEParamGetTiposDoc", "DocTipo");
   }
 
+  async getCondicionesIva(auth: WsfeAuth): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetCondicionIvaReceptor", "CondicionIVAReceptor");
+  }
+
   async getTiposIva(auth: WsfeAuth): Promise<ParamItem[]> {
     return this.getParam(auth, "FEParamGetTiposIva", "IvaTipo");
   }
