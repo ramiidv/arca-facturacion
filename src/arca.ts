@@ -43,6 +43,7 @@ import type {
   FacturaExpoResult,
   CaeaSolicitarResult,
   CaeaRegInfRequest,
+  CaeaRegInfResult,
   CaeaSinMovResult,
   Contribuyente,
 } from "./types.js";
@@ -421,7 +422,7 @@ export class Arca {
       cbteNro: Number(authResult?.Cbte_nro ?? nextNum),
       ptoVta: Number(authResult?.Punto_vta ?? opts.ptoVta),
       cbteTipo: Number(authResult?.Cbte_tipo ?? opts.cbteTipo),
-      obs: authResult?.Obs,
+      obs: authResult?.Motivos_Obs,
       raw: result,
     };
   }
@@ -455,7 +456,7 @@ export class Arca {
   /** Informa comprobantes emitidos con un CAEA. */
   async registrarCAEA(
     request: CaeaRegInfRequest
-  ): Promise<FECAESolicitarResult> {
+  ): Promise<CaeaRegInfResult> {
     const auth = await this.getAuth();
     return this.wsfe.registrarCAEA(auth, request);
   }
@@ -491,7 +492,14 @@ export class Arca {
       invoices: [{ ...detail, CAEA: caea }],
     });
 
-    return parseFacturaResult(result, importes);
+    // CaeaRegInfResult usa FECAEADetResponse, adaptar para parseFacturaResult
+    const adapted = {
+      ...result,
+      FeDetResp: {
+        FECAEDetResponse: result.FeDetResp.FECAEADetResponse,
+      },
+    } as FECAESolicitarResult;
+    return parseFacturaResult(adapted, importes);
   }
 
   /** Informa que no hubo movimientos para un CAEA en un punto de venta. */

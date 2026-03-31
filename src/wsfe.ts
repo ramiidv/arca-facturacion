@@ -18,6 +18,7 @@ import type {
   ArcaEvent,
   CaeaSolicitarResult,
   CaeaRegInfRequest,
+  CaeaRegInfResult,
   CaeaSinMovResult,
 } from "./types.js";
 
@@ -210,9 +211,9 @@ export class WsfeClient {
       Auth: auth,
       Periodo: periodo,
       Orden: orden,
-    })) as CaeaSolicitarResult;
+    })) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
     checkErrors(result);
-    return result;
+    return result.ResultGet!;
   }
 
   async consultarCAEA(
@@ -224,15 +225,15 @@ export class WsfeClient {
       Auth: auth,
       Periodo: periodo,
       Orden: orden,
-    })) as CaeaSolicitarResult;
+    })) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
     checkErrors(result);
-    return result;
+    return result.ResultGet!;
   }
 
   async registrarCAEA(
     auth: WsfeAuth,
     request: CaeaRegInfRequest
-  ): Promise<FECAESolicitarResult> {
+  ): Promise<CaeaRegInfResult> {
     const detRequests = request.invoices.map((inv) => {
       const det = this.buildDetRequest(inv);
       det.CAEA = inv.CAEA;
@@ -249,7 +250,7 @@ export class WsfeClient {
         },
         FeDetReq: { FECAEADetRequest: detRequests },
       },
-    })) as FECAESolicitarResult;
+    })) as CaeaRegInfResult;
     checkErrors(result);
     return result;
   }

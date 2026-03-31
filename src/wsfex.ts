@@ -104,9 +104,13 @@ export class WsfexClient {
     cbteTipo: number
   ): Promise<number> {
     const result = (await this.call("FEXGetLast_CMP", {
-      Auth: auth,
-      Cbte_Tipo: cbteTipo,
-      Punto_vta: ptoVta,
+      Auth: {
+        Token: auth.Token,
+        Sign: auth.Sign,
+        Cuit: auth.Cuit,
+        Pto_venta: ptoVta,
+        Cbte_Tipo: cbteTipo,
+      },
     })) as WsfexLastCmpResult;
     checkFexErr(result);
     return Number(result.FEXResult_LastCMP?.Cbte_nro ?? 0);

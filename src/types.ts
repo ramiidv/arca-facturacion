@@ -79,7 +79,7 @@ export interface ComprobanteAsociado {
   /** Número de comprobante asociado */
   Nro: number;
   /** CUIT del emisor del comprobante asociado */
-  Cuit?: number;
+  Cuit?: string | number;
   /** Fecha del comprobante asociado (formato YYYYMMDD) */
   CbteFch?: string;
 }
@@ -373,7 +373,7 @@ export interface WsfexInvoice {
   /** Cotización de la moneda */
   Moneda_ctz: number;
   /** Importe total del comprobante */
-  Imp_total?: number;
+  Imp_total: number;
   /** Observaciones comerciales */
   Obs_comerciales?: string;
   /** Observaciones */
@@ -412,7 +412,7 @@ export interface WsfexAuthResult {
     Fch_cbte: string;
     Fch_venc_Cae: string;
     Reproceso: string;
-    Obs?: string;
+    Motivos_Obs?: string;
   };
   FEXErr?: { ErrCode: number; ErrMsg: string };
   FEXEvents?: { EventCode: number; EventMsg: string };
@@ -421,8 +421,7 @@ export interface WsfexAuthResult {
 export interface WsfexLastCmpResult {
   FEXResult_LastCMP?: {
     Cbte_nro: number;
-    Cbte_tipo: number;
-    Punto_vta: number;
+    Cbte_fecha: string;
   };
   FEXErr?: { ErrCode: number; ErrMsg: string };
 }
@@ -452,10 +451,11 @@ export interface WsfexGetCmpResult {
   FEXErr?: { ErrCode: number; ErrMsg: string };
 }
 
-export interface WsfexParamItem {
-  Id: number | string;
-  Ds: string;
-}
+/**
+ * Item de parámetro WSFEX. Los nombres de campo varían por tipo
+ * (ej: Mon_Id, Cbte_Id, DST_Codigo, etc.). Usar Record para acceso genérico.
+ */
+export type WsfexParamItem = Record<string, string | number>;
 
 // ============================================================
 // CAEA - Autorización Anticipada
@@ -469,6 +469,13 @@ export interface CaeaSolicitarResult {
   FchVigHasta: string;
   FchTopeInf: string;
   FchProceso: string;
+  Errors?: { Err: WsError | WsError[] };
+  Events?: { Evt: WsError | WsError[] };
+}
+
+export interface CaeaRegInfResult {
+  FeCabResp: FeCabResp;
+  FeDetResp: { FECAEADetResponse: FECAEDetResponse | FECAEDetResponse[] };
   Errors?: { Err: WsError | WsError[] };
   Events?: { Evt: WsError | WsError[] };
 }

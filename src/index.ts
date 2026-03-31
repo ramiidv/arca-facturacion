@@ -56,6 +56,7 @@ export type {
   // CAEA
   CaeaSolicitarResult,
   CaeaRegInfRequest,
+  CaeaRegInfResult,
   CaeaSinMovResult,
   // Padrón
   Contribuyente,
