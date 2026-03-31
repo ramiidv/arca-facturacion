@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.5
+
+- **Fix**: `Permiso_existente` now defaults to `""` for Servicios (2) and Otros (4) — was `"N"` which AFIP rejects
+- **Fix**: `Fecha_pago` auto-set to invoice date for service exports when not provided
+- Round `Imp_total` to 2 decimals in `facturarExpo`
+- Validate `condicionIva` required for non-consumidor-final invoices
+- Validate `tipoExpo`, `cliente.domicilio`, `cliente.cuitPais` in export
+- 53 tests (5 new validation tests)
+
 ## 1.2.4
 
 - **Fix**: WSFEX `FEXGetLast_CMP` params inside Auth with correct field name `Pto_venta`

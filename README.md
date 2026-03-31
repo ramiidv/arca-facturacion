@@ -53,7 +53,7 @@ if (result.aprobada) {
 }
 ```
 
-El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), agrupa alícuotas de IVA, y completa `CondicionIVAReceptorId` (obligatorio desde abril 2026) para consumidor final.
+El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), agrupa alícuotas de IVA, y completa `CondicionIVAReceptorId` (obligatorio desde abril 2026) para consumidor final. Valida todos los campos requeridos antes de enviar a ARCA.
 
 ## Configuración
 
@@ -190,7 +190,7 @@ const result = await arca.facturar({
 
 ### Factura de exportación (WSFEX)
 
-ID, número de comprobante y total por item se calculan automáticamente.
+ID, número, `Imp_total` y `Fecha_pago` se calculan automáticamente. `Permiso_existente` se auto-ajusta a `""` para servicios/otros (solo válido `"S"`/`"N"` para bienes).
 
 ```typescript
 const result = await arca.facturarExpo({

@@ -233,6 +233,13 @@ await arca.getCondicionesIva();          // valid CondicionIva values from ARCA
 arca.clearAuthCache();                   // invalidate cached auth tokens
 ```
 
+## Input validation
+
+The SDK validates inputs before sending to ARCA, throwing `ArcaError` with clear messages:
+- `facturar()`: ptoVta, cbteTipo, items (neto >= 0, no iva+exento), servicio dates, cotizacion for foreign currency. **condicionIva required for non-consumidor-final** (mandatory since April 2026).
+- `facturarExpo()`: ptoVta, cbteTipo, tipoExpo, cliente (nombre, domicilio, cuitPais), moneda, cotizacion, formaPago, pais, items (descripcion, cantidad, precioUnitario).
+- `crearFactura()`: PtoVta, CbteTipo, invoices not empty, each invoice has ImpTotal, CbteDesde/Hasta, CbteFch, MonId, MonCotiz.
+
 ## Error handling
 
 ```typescript
@@ -420,7 +427,7 @@ const url = Arca.generateQRUrl({
 
 ## WSFEX (Export invoices)
 
-Simplified API (`facturarExpo`) auto-handles ID, numbering, and item total calculation:
+Simplified API (`facturarExpo`) auto-handles ID, numbering, `Imp_total`, `Fecha_pago` (for services), and `Permiso_existente` (`""` for services/otros, `"N"` for bienes):
 
 ```typescript
 const result = await arca.facturarExpo({
