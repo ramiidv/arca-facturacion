@@ -4,7 +4,7 @@ import {
   validateFacturarExpoOpts,
   validateInvoiceRequest,
 } from "../src/validation.js";
-import { IvaTipo, CbteTipo } from "../src/constants.js";
+import { IvaTipo, CbteTipo, DocTipo, CondicionIva } from "../src/constants.js";
 
 describe("validateFacturarOpts", () => {
   const validOpts = {
@@ -56,6 +56,33 @@ describe("validateFacturarOpts", () => {
     ).toThrow("cotizacion");
   });
 
+  it("rechaza Factura A sin condicionIva", () => {
+    expect(() =>
+      validateFacturarOpts({
+        ...validOpts,
+        docTipo: DocTipo.CUIT,
+        docNro: 30712345678,
+      })
+    ).toThrow("condicionIva");
+  });
+
+  it("acepta Factura A con condicionIva", () => {
+    expect(() =>
+      validateFacturarOpts({
+        ...validOpts,
+        docTipo: DocTipo.CUIT,
+        docNro: 30712345678,
+        condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
+      })
+    ).not.toThrow();
+  });
+
+  it("no requiere condicionIva para consumidor final", () => {
+    expect(() =>
+      validateFacturarOpts(validOpts) // default docTipo=99
+    ).not.toThrow();
+  });
+
   it("rechaza servicio incompleto", () => {
     expect(() =>
       validateFacturarOpts({
@@ -88,6 +115,21 @@ describe("validateFacturarExpoOpts", () => {
 
   it("acepta opts válidos", () => {
     expect(() => validateFacturarExpoOpts(validOpts)).not.toThrow();
+  });
+
+  it("rechaza sin tipoExpo", () => {
+    expect(() =>
+      validateFacturarExpoOpts({ ...validOpts, tipoExpo: 0 as any })
+    ).toThrow("tipoExpo");
+  });
+
+  it("rechaza sin cliente.domicilio", () => {
+    expect(() =>
+      validateFacturarExpoOpts({
+        ...validOpts,
+        cliente: { ...validOpts.cliente, domicilio: "" },
+      })
+    ).toThrow("domicilio");
   });
 
   it("rechaza sin cliente", () => {

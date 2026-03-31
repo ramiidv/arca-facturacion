@@ -1,4 +1,5 @@
 import { ArcaError } from "./errors.js";
+import { DocTipo } from "./constants.js";
 import type {
   FacturarOpts,
   FacturarExpoOpts,
@@ -32,6 +33,12 @@ export function validateFacturarOpts(opts: FacturarOpts): void {
   if (opts.moneda && opts.moneda !== "PES" && !opts.cotizacion)
     fail("cotizacion es requerido para moneda extranjera");
 
+  // CondicionIVAReceptorId obligatorio desde abril 2026.
+  // Se auto-infiere solo para consumidor final (docTipo 99).
+  const docTipo = opts.docTipo ?? DocTipo.CONSUMIDOR_FINAL;
+  if (docTipo !== DocTipo.CONSUMIDOR_FINAL && opts.condicionIva == null)
+    fail("condicionIva es requerido (obligatorio desde abril 2026). Usar enum CondicionIva.");
+
   if (opts.tributos) {
     for (const t of opts.tributos) {
       if (t.Id == null) fail("tributo.Id es requerido");
@@ -54,12 +61,18 @@ export function validateFacturarExpoOpts(opts: FacturarExpoOpts): void {
     fail("ptoVta debe ser >= 1");
   if (!opts.cbteTipo)
     fail("cbteTipo es requerido");
+  if (!opts.tipoExpo)
+    fail("tipoExpo es requerido (1=Bienes, 2=Servicios, 4=Otros)");
   if (!opts.items || opts.items.length === 0)
     fail("items no puede estar vacío");
   if (!opts.cliente)
     fail("cliente es requerido");
   if (!opts.cliente.nombre)
     fail("cliente.nombre es requerido");
+  if (!opts.cliente.domicilio)
+    fail("cliente.domicilio es requerido");
+  if (!opts.cliente.cuitPais)
+    fail("cliente.cuitPais es requerido");
   if (!opts.moneda)
     fail("moneda es requerido para exportación");
   if (!opts.cotizacion)
