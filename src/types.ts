@@ -21,6 +21,8 @@ export interface ArcaConfig {
   retryDelayMs?: number;
   /** Callback para eventos del SDK (auth, requests, retries). Para logging/debugging. */
   onEvent?: (event: ArcaEvent) => void;
+  /** TTL del cache de parámetros (getTipos*, getMonedas, etc.) en milisegundos. Default: 86400000 (24 horas). 0 para desactivar. */
+  paramCacheTTLMs?: number;
 }
 
 // ============================================================

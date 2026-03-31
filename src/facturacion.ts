@@ -81,12 +81,6 @@ export function calcularTotales(
   const ivaMap = new Map<number, { baseImp: number; importe: number }>();
 
   for (const item of items) {
-    if (item.exento && item.iva !== undefined) {
-      throw new Error(
-        "LineItem no puede tener 'iva' y 'exento' a la vez. Usá uno u otro."
-      );
-    }
-
     if (item.exento) {
       impOpEx = round2(impOpEx + item.neto);
     } else if (item.iva !== undefined) {

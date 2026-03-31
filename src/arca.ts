@@ -10,6 +10,11 @@ import {
   calcularTotales,
 } from "./facturacion.js";
 import { ArcaError } from "./errors.js";
+import {
+  validateFacturarOpts,
+  validateFacturarExpoOpts,
+  validateInvoiceRequest,
+} from "./validation.js";
 import type {
   ArcaConfig,
   ArcaEvent,
@@ -52,11 +57,14 @@ export class Arca {
   private production: boolean;
   private emitter = new EventEmitter();
   private onEventCb?: (event: ArcaEvent) => void;
+  private paramCache = new Map<string, { data: unknown; expires: number }>();
+  private paramCacheTTLMs: number;
 
   constructor(config: ArcaConfig) {
     this.cuit = config.cuit;
     this.production = config.production ?? false;
     this.onEventCb = config.onEvent;
+    this.paramCacheTTLMs = config.paramCacheTTLMs ?? 24 * 60 * 60_000; // default 24h
 
     const timeoutMs = config.requestTimeoutMs ?? 30_000;
     const retries = config.retries ?? 1;
@@ -126,6 +134,7 @@ export class Arca {
 
   /** Solicita CAE para uno o más comprobantes (API raw). */
   async crearFactura(request: InvoiceRequest): Promise<FECAESolicitarResult> {
+    validateInvoiceRequest(request);
     const auth = await this.getAuth();
     return this.wsfe.solicitarCAE(auth, request);
   }
@@ -168,6 +177,7 @@ export class Arca {
    * Calcula automáticamente IVA, totales, y número de comprobante.
    */
   async facturar(opts: FacturarOpts): Promise<FacturaResult> {
+    validateFacturarOpts(opts);
     const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
     const { detail, importes } = buildInvoiceDetail(opts, nextNum);
     const result = await this.crearFactura({
@@ -347,6 +357,7 @@ export class Arca {
    * Obtiene automáticamente el ID y número de comprobante.
    */
   async facturarExpo(opts: FacturarExpoOpts): Promise<FacturaExpoResult> {
+    validateFacturarExpoOpts(opts);
     const auth = await this.getAuth("wsfex");
     const [lastId, nextNum] = await Promise.all([
       this.wsfex.getLastId(auth),
@@ -469,6 +480,8 @@ export class Arca {
     caea: string,
     opts: FacturarOpts
   ): Promise<FacturaResult> {
+    if (!caea) throw new ArcaError("Validación: caea es requerido");
+    validateFacturarOpts(opts);
     const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
     const { detail, importes } = buildInvoiceDetail(opts, nextNum);
 
@@ -517,62 +530,102 @@ export class Arca {
   // Estado y parámetros WSFE
   // ============================================================
 
+  private async cachedParam<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    if (this.paramCacheTTLMs > 0) {
+      const cached = this.paramCache.get(key);
+      if (cached && cached.expires > Date.now()) return cached.data as T;
+    }
+    const data = await fn();
+    if (this.paramCacheTTLMs > 0) {
+      this.paramCache.set(key, { data, expires: Date.now() + this.paramCacheTTLMs });
+    }
+    return data;
+  }
+
   /** Estado de los servidores WSFE. No requiere autenticación. */
   async serverStatus(): Promise<ServerStatus> {
     return this.wsfe.serverStatus();
   }
 
+  /** Tipos de comprobante disponibles. Cacheado. */
   async getTiposComprobante(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposComprobante(auth);
+    return this.cachedParam("tiposCbte", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposComprobante(auth);
+    });
   }
 
+  /** Tipos de concepto (Productos, Servicios, Ambos). Cacheado. */
   async getTiposConcepto(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposConcepto(auth);
+    return this.cachedParam("tiposConcepto", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposConcepto(auth);
+    });
   }
 
+  /** Tipos de documento disponibles (CUIT, DNI, etc.). Cacheado. */
   async getTiposDocumento(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposDocumento(auth);
+    return this.cachedParam("tiposDoc", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposDocumento(auth);
+    });
   }
 
-  /** Obtiene las condiciones de IVA válidas para el receptor. */
+  /** Condiciones de IVA válidas para el receptor. Cacheado. */
   async getCondicionesIva(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getCondicionesIva(auth);
+    return this.cachedParam("condicionesIva", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getCondicionesIva(auth);
+    });
   }
 
+  /** Alícuotas de IVA disponibles (0%, 2.5%, 5%, 10.5%, 21%, 27%). Cacheado. */
   async getTiposIva(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposIva(auth);
+    return this.cachedParam("tiposIva", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposIva(auth);
+    });
   }
 
+  /** Monedas disponibles. Cacheado. */
   async getMonedas(): Promise<MonedaItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getMonedas(auth);
+    return this.cachedParam("monedas", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getMonedas(auth);
+    });
   }
 
+  /** Tipos de tributo disponibles. Cacheado. */
   async getTiposTributo(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposTributo(auth);
+    return this.cachedParam("tiposTrib", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposTributo(auth);
+    });
   }
 
+  /** Tipos de datos opcionales disponibles. Cacheado. */
   async getTiposOpcional(): Promise<ParamItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getTiposOpcional(auth);
+    return this.cachedParam("tiposOpc", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getTiposOpcional(auth);
+    });
   }
 
+  /** Puntos de venta habilitados. Cacheado. */
   async getPuntosVenta(): Promise<PtoVentaItem[]> {
-    const auth = await this.getAuth();
-    return this.wsfe.getPuntosVenta(auth);
+    return this.cachedParam("ptosVenta", async () => {
+      const auth = await this.getAuth();
+      return this.wsfe.getPuntosVenta(auth);
+    });
   }
 
+  /** Cotización de una moneda. No cacheado (cambia frecuentemente). */
   async getCotizacion(monedaId: string): Promise<CotizacionResult> {
     const auth = await this.getAuth();
     return this.wsfe.getCotizacion(auth, monedaId);
   }
 
+  /** Cantidad máxima de registros por request de FECAESolicitar. Cacheado. */
   async getCantMaxRegistros(): Promise<number> {
     const auth = await this.getAuth();
     return this.wsfe.getCantMaxRegistros(auth);
@@ -661,5 +714,10 @@ export class Arca {
     this.wsaa.clearTicket("wsfex");
     this.wsaa.clearTicket("ws_sr_padron_a5");
     this.wsaa.clearTicket("ws_sr_padron_a13");
+  }
+
+  /** Invalida el cache de parámetros (getTipos*, getMonedas, etc.). */
+  clearParamCache(): void {
+    this.paramCache.clear();
   }
 }
