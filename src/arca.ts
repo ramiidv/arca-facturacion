@@ -385,6 +385,7 @@ export class Arca {
       Moneda_ctz: opts.cotizacion,
       Idioma_cbte: opts.idioma ?? 1,
       Forma_pago: opts.formaPago,
+      Imp_total: items.reduce((sum, i) => sum + i.Pro_total_item, 0),
       Items: items,
     };
 

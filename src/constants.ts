@@ -27,8 +27,8 @@ export const ENDPOINTS = {
 
 export const WSFE_NAMESPACE = "http://ar.gov.afip.dif.FEV1/";
 export const WSFEX_NAMESPACE = "http://ar.gov.afip.dif.fexv1/";
-export const PADRON_A5_NAMESPACE = "http://a5.soap.ws.server.padron.sr.afip.gov.ar/";
-export const PADRON_A13_NAMESPACE = "http://a13.soap.ws.server.padron.sr.afip.gov.ar/";
+export const PADRON_A5_NAMESPACE = "http://a5.soap.ws.server.puc.sr/";
+export const PADRON_A13_NAMESPACE = "http://a13.soap.ws.server.puc.sr/";
 export const WSAA_NAMESPACE =
   "http://wsaa.view.sua.dvadac.desein.afip.gov/LoginCMSService";
 
@@ -128,6 +128,24 @@ export enum DocTipo {
   CI_BS_AS_RNP = 95,
   DNI = 96,
   CONSUMIDOR_FINAL = 99,
+}
+
+// ============================================================
+// Condición de IVA del receptor
+// ============================================================
+
+export enum CondicionIva {
+  RESPONSABLE_INSCRIPTO = 1,
+  EXENTO = 4,
+  CONSUMIDOR_FINAL = 5,
+  MONOTRIBUTISTA = 6,
+  NO_CATEGORIZADO = 7,
+  IMPORTADOR_EXTERIOR = 8,
+  PROVEEDOR_EXTERIOR = 9,
+  NO_ALCANZADO = 10,
+  MONOTRIBUTO_SOCIAL = 13,
+  IVA_NO_ALCANZADO = 15,
+  IVA_LIBERADO = 16,
 }
 
 // ============================================================

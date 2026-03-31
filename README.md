@@ -48,7 +48,7 @@ if (result.aprobada) {
 }
 ```
 
-El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), y agrupa alícuotas de IVA.
+El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), agrupa alícuotas de IVA, y completa `CondicionIVAReceptorId` (obligatorio desde abril 2026) para consumidor final.
 
 ## Configuración
 
@@ -90,6 +90,7 @@ const result = await arca.facturar({
   cbteTipo: CbteTipo.FACTURA_A,
   docTipo: DocTipo.CUIT,
   docNro: 30712345678,
+  condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
   items: [{ neto: 50000, iva: IvaTipo.IVA_21 }],
   servicio: {
     desde: new Date("2026-03-01"),
@@ -565,6 +566,7 @@ Tambien se incluyen tipos especiales: `COMPRA_BIENES_USADOS` (49), `CTA_VTA_LIQ_
 - `CbteTipo` — Tipos de comprobante
 - `Concepto` — Tipos de concepto (Productos, Servicios, Ambos)
 - `DocTipo` — Tipos de documento (CUIT, DNI, Consumidor Final, etc.)
+- `CondicionIva` — Condición de IVA del receptor (RI, CF, Monotributo, Exento, etc.)
 - `IvaTipo` — Alícuotas de IVA (0%, 2.5%, 5%, 10.5%, 21%, 27%)
 - `IVA_RATES` — Record que mapea IvaTipo a su porcentaje numérico
 - `Moneda` — Códigos de moneda (PES, DOL, EUR, etc.)

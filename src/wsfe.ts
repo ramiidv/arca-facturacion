@@ -291,6 +291,10 @@ export class WsfeClient {
       MonCotiz: inv.MonCotiz,
     };
 
+    if (inv.CondicionIVAReceptorId != null)
+      det.CondicionIVAReceptorId = inv.CondicionIVAReceptorId;
+    if (inv.CanMisMonExt) det.CanMisMonExt = inv.CanMisMonExt;
+
     if (inv.FchServDesde) det.FchServDesde = inv.FchServDesde;
     if (inv.FchServHasta) det.FchServHasta = inv.FchServHasta;
     if (inv.FchVtoPago) det.FchVtoPago = inv.FchVtoPago;

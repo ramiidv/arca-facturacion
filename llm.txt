@@ -87,6 +87,8 @@ interface FacturarOpts {
   concepto?: number;                       // Default: PRODUCTOS. Auto-detects SERVICIOS if `servicio` provided
   docTipo?: number;                        // Default: DocTipo.CONSUMIDOR_FINAL (99)
   docNro?: number;                         // Default: 0
+  condicionIva?: number;                   // CondicionIva enum. MANDATORY since April 2026. Auto-set for CF.
+  canMisMonExt?: string;                   // "S"/"N". Required for foreign currency (RG5616).
   fecha?: Date | string;                   // Default: today (Argentina timezone). String = "YYYYMMDD"
   servicio?: { desde, hasta, vtoPago };    // Required for services. Accepts Date or "YYYYMMDD"
   moneda?: string;                         // Default: "PES"
@@ -272,6 +274,19 @@ DocTipo.CUIT              // 80
 DocTipo.DNI               // 96
 DocTipo.CONSUMIDOR_FINAL  // 99
 // ... CUIL (86), CDI (87), Pasaporte (94), etc.
+
+// IVA condition of receiver (MANDATORY since April 2026)
+CondicionIva.RESPONSABLE_INSCRIPTO  // 1
+CondicionIva.EXENTO                 // 4
+CondicionIva.CONSUMIDOR_FINAL      // 5  (auto-set when docTipo=99)
+CondicionIva.MONOTRIBUTISTA        // 6
+CondicionIva.NO_CATEGORIZADO       // 7
+CondicionIva.IMPORTADOR_EXTERIOR   // 8
+CondicionIva.PROVEEDOR_EXTERIOR    // 9
+CondicionIva.NO_ALCANZADO          // 10
+CondicionIva.MONOTRIBUTO_SOCIAL    // 13
+CondicionIva.IVA_NO_ALCANZADO     // 15
+CondicionIva.IVA_LIBERADO          // 16
 
 // IVA rates
 IvaTipo.IVA_0     // 3  → 0%

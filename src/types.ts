@@ -132,6 +132,10 @@ export interface InvoiceDetail {
   CbtesAsoc?: ComprobanteAsociado[];
   /** Array de datos opcionales */
   Opcionales?: Opcional[];
+  /** Condición de IVA del receptor (usar enum CondicionIva). OBLIGATORIO desde abril 2026. */
+  CondicionIVAReceptorId?: number;
+  /** Cancela en misma moneda extranjera: "S" o "N". Requerido para operaciones en moneda extranjera (RG5616). */
+  CanMisMonExt?: string;
 }
 
 export interface InvoiceRequest {
@@ -366,6 +370,8 @@ export interface WsfexInvoice {
   Moneda_Id: string;
   /** Cotización de la moneda */
   Moneda_ctz: number;
+  /** Importe total del comprobante */
+  Imp_total?: number;
   /** Observaciones comerciales */
   Obs_comerciales?: string;
   /** Observaciones */
@@ -633,6 +639,10 @@ export interface FacturarOpts {
   tributos?: Tributo[];
   /** Datos opcionales (ej: CBU para FCE) */
   opcionales?: Opcional[];
+  /** Condición de IVA del receptor (usar enum CondicionIva). Default: se infiere de docTipo si es posible. */
+  condicionIva?: number;
+  /** Cancela en misma moneda extranjera: "S" o "N". Requerido si moneda != PES. */
+  canMisMonExt?: string;
 }
 
 export interface ComprobanteRef {

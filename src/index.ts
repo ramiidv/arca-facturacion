@@ -69,6 +69,7 @@ export {
   CbteTipo,
   Concepto,
   DocTipo,
+  CondicionIva,
   IvaTipo,
   IVA_RATES,
   Moneda,

@@ -1,4 +1,4 @@
-import { IVA_RATES, Concepto, DocTipo, Moneda, isTipoC } from "./constants.js";
+import { IVA_RATES, Concepto, DocTipo, CondicionIva, Moneda, isTipoC } from "./constants.js";
 import type {
   LineItem,
   FacturarOpts,
@@ -176,6 +176,19 @@ export function buildInvoiceDetail(
     MonId: opts.moneda ?? Moneda.PESOS,
     MonCotiz: opts.cotizacion ?? 1,
   };
+
+  // CondicionIVAReceptorId: obligatorio desde abril 2026
+  const docTipo = opts.docTipo ?? DocTipo.CONSUMIDOR_FINAL;
+  if (opts.condicionIva != null) {
+    detail.CondicionIVAReceptorId = opts.condicionIva;
+  } else if (docTipo === DocTipo.CONSUMIDOR_FINAL) {
+    detail.CondicionIVAReceptorId = CondicionIva.CONSUMIDOR_FINAL;
+  }
+
+  // CanMisMonExt: requerido para moneda extranjera
+  if (opts.canMisMonExt) {
+    detail.CanMisMonExt = opts.canMisMonExt;
+  }
 
   if (ivaArray.length > 0) {
     detail.Iva = ivaArray;
