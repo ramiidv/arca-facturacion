@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.2
+
+- Extract shared `toArray()` utility (was duplicated in wsfe, wsfex, padron)
+- Move QR URL to `QR_URL` constant
+- Remove internal padron namespace exports from public API
+- Add `getCondicionesIva()` and `clearAuthCache()` to docs
+- Update CHANGELOG with missing version entries
+
 ## 1.2.1
 
 - Fix `CondicionIva` enum: code 8=PROVEEDOR_EXTERIOR, 9=CLIENTE_EXTERIOR, 10=IVA_LIBERADO (Ley 19.640), 16=MONOTRIBUTO_INDEPENDIENTE_PROMOVIDO
