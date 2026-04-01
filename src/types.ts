@@ -1,3 +1,7 @@
+// Re-export from common
+export type { AccessTicket, ArcaEvent } from '@ramiidv/arca-common';
+import type { ArcaEvent } from '@ramiidv/arca-common';
+
 // ============================================================
 // Configuración
 // ============================================================
@@ -23,16 +27,6 @@ export interface ArcaConfig {
   onEvent?: (event: ArcaEvent) => void;
   /** TTL del cache de parámetros (getTipos*, getMonedas, etc.) en milisegundos. Default: 86400000 (24 horas). 0 para desactivar. */
   paramCacheTTLMs?: number;
-}
-
-// ============================================================
-// WSAA - Autenticación
-// ============================================================
-
-export interface AccessTicket {
-  token: string;
-  sign: string;
-  expirationTime: Date;
 }
 
 // ============================================================
@@ -263,16 +257,6 @@ export interface CotizacionResult {
 
 // ============================================================
 // Eventos / Logging
-// ============================================================
-
-export type ArcaEvent =
-  | { type: "auth:login"; service: string; durationMs: number }
-  | { type: "auth:cache-hit"; service: string }
-  | { type: "request:start"; method: string; endpoint: string }
-  | { type: "request:end"; method: string; durationMs: number }
-  | { type: "request:retry"; method: string; attempt: number; delayMs: number; error: string }
-  | { type: "request:error"; method: string; error: string };
-
 // ============================================================
 // QR
 // ============================================================

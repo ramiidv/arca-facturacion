@@ -83,7 +83,10 @@ export class Arca {
       key: config.key,
       production: this.production,
       tokenTTLMinutes: config.tokenTTLMinutes ?? 720,
-      ...clientOpts,
+      timeout: timeoutMs,
+      retries,
+      retryDelayMs,
+      onEvent: emit,
     });
 
     this.wsfe = new WsfeClient(this.production, clientOpts);

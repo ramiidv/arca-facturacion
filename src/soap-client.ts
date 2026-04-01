@@ -1,6 +1,6 @@
 import { XMLParser, XMLBuilder } from "fast-xml-parser";
 import { ArcaSoapError } from "./errors.js";
-import type { ArcaEvent } from "./types.js";
+import type { ArcaEvent } from "@ramiidv/arca-common";
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -141,6 +141,7 @@ export async function soapCall(
       onEvent?.({
         type: "request:end",
         method,
+        endpoint,
         durationMs: Date.now() - start,
       });
       return responseText;
@@ -149,15 +150,15 @@ export async function soapCall(
       const errMsg =
         err instanceof Error ? err.message : String(err);
 
-      onEvent?.({ type: "request:error", method, error: errMsg });
+      onEvent?.({ type: "request:error", method, endpoint, error: errMsg });
 
       if (attempt < retries && isRetryable(err)) {
         const delay = retryDelayMs * Math.pow(2, attempt);
         onEvent?.({
           type: "request:retry",
           method,
+          endpoint,
           attempt: attempt + 1,
-          delayMs: delay,
           error: errMsg,
         });
         await sleep(delay);

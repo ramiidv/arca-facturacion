@@ -1,26 +1,9 @@
-/**
- * Error base para todos los errores del SDK de ARCA.
- */
-export class ArcaError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ArcaError";
-  }
-}
+// Base errors re-exported from common
+export { ArcaError, ArcaAuthError, ArcaSoapError } from '@ramiidv/arca-common';
+import { ArcaError } from '@ramiidv/arca-common';
 
 /**
- * Error de autenticación WSAA.
- * Se lanza cuando falla el login o la respuesta de WSAA es inválida.
- */
-export class ArcaAuthError extends ArcaError {
-  constructor(message: string) {
-    super(message);
-    this.name = "ArcaAuthError";
-  }
-}
-
-/**
- * Error de WSFE con códigos de error de AFIP.
+ * Error de WSFE/WSFEX con códigos de error de ARCA.
  */
 export class ArcaWSFEError extends ArcaError {
   public readonly errors: { code: number; msg: string }[];
@@ -30,19 +13,5 @@ export class ArcaWSFEError extends ArcaError {
     super(`WSFE Error: ${msg}`);
     this.name = "ArcaWSFEError";
     this.errors = errors;
-  }
-}
-
-/**
- * Error a nivel SOAP/HTTP.
- * Se lanza cuando el request HTTP falla o hay un SOAP Fault.
- */
-export class ArcaSoapError extends ArcaError {
-  public readonly statusCode?: number;
-
-  constructor(message: string, statusCode?: number) {
-    super(message);
-    this.name = "ArcaSoapError";
-    this.statusCode = statusCode;
   }
 }

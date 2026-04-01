@@ -1,7 +1,7 @@
 {
-  "name": "@ramiidv/arca-sdk",
-  "version": "1.2.5",
-  "description": "SDK para interactuar con los Web Services de ARCA (ex AFIP) - Facturación Electrónica Argentina",
+  "name": "@ramiidv/arca-facturacion",
+  "version": "2.0.0",
+  "description": "SDK para Facturación Electrónica con ARCA (ex AFIP) - WSFE, WSFEX, CAEA, QR",
   "author": "ramiidv",
   "license": "MIT",
   "type": "module",
@@ -54,11 +54,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ramiidv/arca-sdk.git"
+    "url": "git+https://github.com/ramiidv/arca-facturacion.git"
   },
   "homepage": "https://arca-sdk.dev/",
   "bugs": {
-    "url": "https://github.com/ramiidv/arca-sdk/issues"
+    "url": "https://github.com/ramiidv/arca-facturacion/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -67,6 +67,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@ramiidv/arca-common": "^0.1.0",
     "fast-xml-parser": "^5.5.9",
     "node-forge": "^1.4.0"
   },

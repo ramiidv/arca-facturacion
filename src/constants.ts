@@ -3,10 +3,6 @@
 // ============================================================
 
 export const ENDPOINTS = {
-  wsaa: {
-    testing: "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
-    production: "https://wsaa.afip.gov.ar/ws/services/LoginCms",
-  },
   wsfe: {
     testing: "https://wswhomo.afip.gov.ar/wsfev1/service.asmx",
     production: "https://servicios1.afip.gov.ar/wsfev1/service.asmx",
@@ -29,8 +25,6 @@ export const WSFE_NAMESPACE = "http://ar.gov.afip.dif.FEV1/";
 export const WSFEX_NAMESPACE = "http://ar.gov.afip.dif.fexv1/";
 export const PADRON_A5_NAMESPACE = "http://a5.soap.ws.server.puc.sr/";
 export const PADRON_A13_NAMESPACE = "http://a13.soap.ws.server.puc.sr/";
-export const WSAA_NAMESPACE =
-  "http://wsaa.view.sua.dvadac.desein.afip.gov";
 
 export const QR_URL = "https://www.afip.gob.ar/fe/qr/";
 
