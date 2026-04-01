@@ -56,7 +56,7 @@
     "type": "git",
     "url": "git+https://github.com/ramiidv/arca-facturacion.git"
   },
-  "homepage": "https://arca-sdk.dev/",
+  "homepage": "https://arca-sdk.dev/facturacion",
   "bugs": {
     "url": "https://github.com/ramiidv/arca-facturacion/issues"
   },
