@@ -1,10 +1,14 @@
 import { EventEmitter } from "node:events";
+import { anySignal } from "@ramiidv/arca-common";
+import type { CallOptions } from "@ramiidv/arca-common";
 import { WsaaClient } from "./wsaa.js";
 import { WsfeClient } from "./wsfe.js";
 import { WsfexClient } from "./wsfex.js";
-import { PadronClient, PADRON_A5_SERVICE } from "./padron.js";
+import { PadronClient, PADRON_A5_SERVICE, PADRON_A13_SERVICE } from "./padron.js";
 import {
-  buildInvoiceDetail,
+  armarComprobante,
+  coincideConIntento,
+  facturaResultDesdeConsulta,
   parseFacturaResult,
   toDateString,
   calcularTotales,
@@ -46,16 +50,26 @@ import type {
   CaeaRegInfResult,
   CaeaSinMovResult,
   Contribuyente,
+  ComprobanteArmado,
+  ComprobanteRef,
+  IntentoComprobante,
+  ResultadoRecuperacion,
 } from "./types.js";
 import { NOTA_CREDITO_MAP, NOTA_DEBITO_MAP, QR_URL } from "./constants.js";
 
 export class Arca {
-  private wsaa: WsaaClient;
+  /**
+   * Cliente WSAA de esta instancia. Se puede pasar a otras instancias que usan
+   * el mismo certificado (ej: `new ArcaPadron({ ..., wsaa: arca.wsaa })`) para
+   * compartir los tickets.
+   */
+  public readonly wsaa: WsaaClient;
   private wsfe: WsfeClient;
   private wsfex: WsfexClient;
   private padron: PadronClient;
   private cuit: number;
   private production: boolean;
+  private signal?: AbortSignal;
   private emitter = new EventEmitter();
   private onEventCb?: (event: ArcaEvent) => void;
   private paramCache = new Map<string, { data: unknown; expires: number }>();
@@ -65,6 +79,7 @@ export class Arca {
     this.cuit = config.cuit;
     this.production = config.production ?? false;
     this.onEventCb = config.onEvent;
+    this.signal = config.signal;
     this.paramCacheTTLMs = config.paramCacheTTLMs ?? 24 * 60 * 60_000; // default 24h
 
     const timeoutMs = config.requestTimeoutMs ?? 30_000;
@@ -78,16 +93,21 @@ export class Arca {
 
     const clientOpts = { timeoutMs, retries, retryDelayMs, onEvent: emit };
 
-    this.wsaa = new WsaaClient({
-      cert: config.cert,
-      key: config.key,
-      production: this.production,
-      tokenTTLMinutes: config.tokenTTLMinutes ?? 720,
-      timeout: timeoutMs,
-      retries,
-      retryDelayMs,
-      onEvent: emit,
-    });
+    this.wsaa =
+      config.wsaa ??
+      new WsaaClient({
+        cert: config.cert,
+        key: config.key,
+        production: this.production,
+        tokenTTLMinutes: config.tokenTTLMinutes ?? 720,
+        timeout: timeoutMs,
+        retries,
+        retryDelayMs,
+        onEvent: emit,
+        ticketStorage: config.ticketStorage,
+        clockOffsetMs: config.clockOffsetMs,
+        autoClockSkew: config.autoClockSkew,
+      });
 
     this.wsfe = new WsfeClient(this.production, clientOpts);
     this.wsfex = new WsfexClient(this.production, clientOpts);
@@ -123,8 +143,13 @@ export class Arca {
   // Auth helpers
   // ============================================================
 
-  private async getAuth(service: string = "wsfe"): Promise<WsfeAuth> {
-    const ticket = await this.wsaa.getAccessTicket(service);
+  /** Combina el signal global de la config con el de la llamada. */
+  private opts(call?: CallOptions): CallOptions {
+    return { signal: anySignal(this.signal, call?.signal) };
+  }
+
+  private async getAuth(service: string = "wsfe", call?: CallOptions): Promise<WsfeAuth> {
+    const ticket = await this.wsaa.getAccessTicket(service, call);
     return {
       Token: ticket.token,
       Sign: ticket.sign,
@@ -136,25 +161,33 @@ export class Arca {
   // Facturación - Métodos principales (raw)
   // ============================================================
 
-  /** Solicita CAE para uno o más comprobantes (API raw). */
-  async crearFactura(request: InvoiceRequest): Promise<FECAESolicitarResult> {
+  /**
+   * Solicita CAE para uno o más comprobantes (API raw).
+   *
+   * No se reintenta. Si el resultado es incierto lanza `ArcaResultadoIncierto`;
+   * si ARCA rechaza el request, `ArcaWSFEError`.
+   */
+  async crearFactura(request: InvoiceRequest, call?: CallOptions): Promise<FECAESolicitarResult> {
     validateInvoiceRequest(request);
-    const auth = await this.getAuth();
-    return this.wsfe.solicitarCAE(auth, request);
+    const opts = this.opts(call);
+    const auth = await this.getAuth("wsfe", opts);
+    return this.wsfe.solicitarCAE(auth, request, opts);
   }
 
   /** Último número de comprobante autorizado. */
-  async ultimoComprobante(ptoVta: number, cbteTipo: number): Promise<number> {
-    const auth = await this.getAuth();
-    return this.wsfe.ultimoComprobante(auth, ptoVta, cbteTipo);
+  async ultimoComprobante(ptoVta: number, cbteTipo: number, call?: CallOptions): Promise<number> {
+    const opts = this.opts(call);
+    const auth = await this.getAuth("wsfe", opts);
+    return this.wsfe.ultimoComprobante(auth, ptoVta, cbteTipo, opts);
   }
 
   /** Siguiente número de comprobante (último + 1). */
   async siguienteComprobante(
     ptoVta: number,
-    cbteTipo: number
+    cbteTipo: number,
+    call?: CallOptions
   ): Promise<number> {
-    const ultimo = await this.ultimoComprobante(ptoVta, cbteTipo);
+    const ultimo = await this.ultimoComprobante(ptoVta, cbteTipo, call);
     return ultimo + 1;
   }
 
@@ -162,14 +195,15 @@ export class Arca {
   async crearFacturaAuto(
     ptoVta: number,
     cbteTipo: number,
-    invoice: Omit<InvoiceDetail, "CbteDesde" | "CbteHasta">
+    invoice: Omit<InvoiceDetail, "CbteDesde" | "CbteHasta">,
+    call?: CallOptions
   ): Promise<FECAESolicitarResult> {
-    const nextNum = await this.siguienteComprobante(ptoVta, cbteTipo);
+    const nextNum = await this.siguienteComprobante(ptoVta, cbteTipo, call);
     return this.crearFactura({
       PtoVta: ptoVta,
       CbteTipo: cbteTipo,
       invoices: [{ ...invoice, CbteDesde: nextNum, CbteHasta: nextNum }],
-    });
+    }, call);
   }
 
   // ============================================================
@@ -177,84 +211,118 @@ export class Arca {
   // ============================================================
 
   /**
-   * Crea una factura con API simplificada.
-   * Calcula automáticamente IVA, totales, y número de comprobante.
+   * Valida y arma un comprobante sin enviarlo (no usa la red). Si `fecha` no
+   * viene, usa la fecha de hoy según el reloj de ARCA (`clockOffsetMs`).
+   *
+   * Persistí el `intento` antes de enviar: si el proceso se cae o el resultado
+   * es incierto, pasalo a `recuperarComprobante`.
    */
-  async facturar(opts: FacturarOpts): Promise<FacturaResult> {
-    validateFacturarOpts(opts);
-    const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
-    const { detail, importes } = buildInvoiceDetail(opts, nextNum);
-    const result = await this.crearFactura({
-      PtoVta: opts.ptoVta,
-      CbteTipo: opts.cbteTipo,
-      invoices: [detail],
-    });
-    return parseFacturaResult(result, importes);
+  armarComprobante(opts: FacturarOpts & { cbteNro: number }): ComprobanteArmado {
+    return armarComprobante(opts, { ahora: this.wsaa.now() });
+  }
+
+  /**
+   * Crea una factura con API simplificada.
+   * Calcula automáticamente IVA y totales. Si no viene `cbteNro`, usa el
+   * último autorizado + 1 (sin lock: serializá las emisiones por ptoVta y cbteTipo).
+   *
+   * - `ArcaWSFEError`: ARCA rechazó el comprobante (no se emitió).
+   * - `ArcaResultadoIncierto`: no se sabe si se emitió; usar `recuperarComprobante(error.intento)`.
+   * - `aprobada: false`: ARCA respondió con resultado "R" (no se emitió), ver `observaciones`.
+   */
+  async facturar(opts: FacturarOpts, call?: CallOptions): Promise<FacturaResult> {
+    return this.emitirComprobante(opts, call);
   }
 
   /**
    * Crea una nota de crédito. Tipo de NC inferido del comprobante original.
    */
-  async notaCredito(opts: NotaCreditoOpts): Promise<FacturaResult> {
+  async notaCredito(opts: NotaCreditoOpts, call?: CallOptions): Promise<FacturaResult> {
     const cbteTipo = NOTA_CREDITO_MAP[opts.comprobanteOriginal.tipo];
     if (cbteTipo === undefined) {
       throw new ArcaError(
         `No se puede inferir el tipo de Nota de Crédito para CbteTipo ${opts.comprobanteOriginal.tipo}`
       );
     }
-    return this.facturarConAsociado(cbteTipo, opts);
+    return this.emitirComprobante(this.conAsociado(cbteTipo, opts), call);
   }
 
   /**
    * Crea una nota de débito. Tipo de ND inferido del comprobante original.
    */
-  async notaDebito(opts: NotaDebitoOpts): Promise<FacturaResult> {
+  async notaDebito(opts: NotaDebitoOpts, call?: CallOptions): Promise<FacturaResult> {
     const cbteTipo = NOTA_DEBITO_MAP[opts.comprobanteOriginal.tipo];
     if (cbteTipo === undefined) {
       throw new ArcaError(
         `No se puede inferir el tipo de Nota de Débito para CbteTipo ${opts.comprobanteOriginal.tipo}`
       );
     }
-    return this.facturarConAsociado(cbteTipo, opts);
+    return this.emitirComprobante(this.conAsociado(cbteTipo, opts), call);
   }
 
-  private async facturarConAsociado(
+  private conAsociado(
     cbteTipo: number,
     opts: NotaCreditoOpts | NotaDebitoOpts
-  ): Promise<FacturaResult> {
-    const orig = opts.comprobanteOriginal;
-    const fullOpts: FacturarOpts = { ...opts, cbteTipo };
+  ): FacturarOpts {
+    const { comprobanteOriginal, ...rest } = opts;
+    const asociados: ComprobanteRef[] = [comprobanteOriginal, ...(opts.cbtesAsoc ?? [])];
+    return { ...rest, cbteTipo, cbtesAsoc: asociados };
+  }
 
-    const nextNum = await this.siguienteComprobante(opts.ptoVta, cbteTipo);
-    const { detail, importes } = buildInvoiceDetail(fullOpts, nextNum);
-
-    detail.CbtesAsoc = [
-      {
-        Tipo: orig.tipo,
-        PtoVta: orig.ptoVta,
-        Nro: orig.nro,
-        ...(orig.cuit !== undefined && { Cuit: orig.cuit }),
-        ...(orig.fecha !== undefined && { CbteFch: toDateString(orig.fecha) }),
-      },
-    ];
-
-    const result = await this.crearFactura({
-      PtoVta: opts.ptoVta,
-      CbteTipo: cbteTipo,
-      invoices: [detail],
-    });
-
+  private async emitirComprobante(opts: FacturarOpts, call?: CallOptions): Promise<FacturaResult> {
+    // Validar antes de tocar la red.
+    validateFacturarOpts(opts);
+    const cbteNro = opts.cbteNro ?? (await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo, call));
+    const { request, importes } = this.armarComprobante({ ...opts, cbteNro });
+    const result = await this.crearFactura(
+      { PtoVta: opts.ptoVta, CbteTipo: opts.cbteTipo, invoices: [request] },
+      call
+    );
     return parseFacturaResult(result, importes);
+  }
+
+  /**
+   * Resuelve un resultado incierto (`ArcaResultadoIncierto`) consultando ARCA.
+   *
+   * - Si el último autorizado es menor que `cbteNro` → `no_emitido`: reintentar
+   *   con el mismo `cbteNro` es seguro (si el intento original llegara a
+   *   autorizarse después, ARCA rechaza el reintento con el error 10016).
+   * - Si no, consulta el comprobante y compara ImpTotal (tolerancia 0,01),
+   *   DocTipo, DocNro y CbteFch: si coinciden → `autorizado` con el CAE; si no
+   *   → `conflicto` (ese número lo usó otra emisión).
+   *
+   * Tip: si la respuesta se perdió por timeout, esperar unos segundos antes de
+   * llamar: ARCA puede seguir procesando el request original.
+   */
+  async recuperarComprobante(
+    intento: IntentoComprobante,
+    call?: CallOptions
+  ): Promise<ResultadoRecuperacion> {
+    const ultimo = await this.ultimoComprobante(intento.ptoVta, intento.cbteTipo, call);
+    if (ultimo < intento.cbteNro) return { estado: "no_emitido" };
+
+    const encontrado = await this.consultarComprobante(
+      intento.cbteTipo,
+      intento.ptoVta,
+      intento.cbteNro,
+      call
+    );
+    if (coincideConIntento(encontrado, intento)) {
+      return { estado: "autorizado", resultado: facturaResultDesdeConsulta(encontrado) };
+    }
+    return { estado: "conflicto", encontrado };
   }
 
   /** Consulta un comprobante previamente autorizado. */
   async consultarComprobante(
     cbteTipo: number,
     ptoVta: number,
-    cbteNro: number
+    cbteNro: number,
+    call?: CallOptions
   ): Promise<FECompConsultarResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.consultarComprobante(auth, cbteTipo, ptoVta, cbteNro);
+    const opts = this.opts(call);
+    const auth = await this.getAuth("wsfe", opts);
+    return this.wsfe.consultarComprobante(auth, cbteTipo, ptoVta, cbteNro, opts);
   }
 
   // ============================================================
@@ -262,20 +330,21 @@ export class Arca {
   // ============================================================
 
   /** Autoriza un comprobante de exportación (WSFEX). */
-  async crearFacturaExportacion(
-    invoice: WsfexInvoice
-  ): Promise<WsfexAuthResult> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.authorize(auth, invoice);
+  async crearFacturaExportacion(invoice: WsfexInvoice, call?: CallOptions): Promise<WsfexAuthResult> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.authorize(auth, invoice, callOpts);
   }
 
   /** Último número de comprobante de exportación autorizado. */
   async ultimoComprobanteExpo(
     ptoVta: number,
-    cbteTipo: number
+    cbteTipo: number,
+    call?: CallOptions
   ): Promise<number> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getLastCmp(auth, ptoVta, cbteTipo);
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getLastCmp(auth, ptoVta, cbteTipo, callOpts);
   }
 
   /** Siguiente número de comprobante de exportación. */
@@ -288,87 +357,99 @@ export class Arca {
   }
 
   /** Último ID de request WSFEX. */
-  async ultimoIdExpo(): Promise<number> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getLastId(auth);
+  async ultimoIdExpo(call?: CallOptions): Promise<number> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getLastId(auth, callOpts);
   }
 
   /** Consulta un comprobante de exportación. */
   async consultarComprobanteExpo(
     cbteTipo: number,
     ptoVta: number,
-    cbteNro: number
+    cbteNro: number,
+    call?: CallOptions
   ): Promise<WsfexGetCmpResult> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getCmp(auth, cbteTipo, ptoVta, cbteNro);
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getCmp(auth, cbteTipo, ptoVta, cbteNro, callOpts);
   }
 
   /** Estado de los servidores WSFEX. */
-  async serverStatusExpo(): Promise<ServerStatus> {
-    return this.wsfex.serverStatus();
+  async serverStatusExpo(call?: CallOptions): Promise<ServerStatus> {
+    return this.wsfex.serverStatus(this.opts(call));
   }
 
   /** Tipos de comprobante de exportación. */
-  async getTiposCbteExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getTiposCbte(auth);
+  async getTiposCbteExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getTiposCbte(auth, callOpts);
   }
 
   /** Monedas (WSFEX). */
-  async getMonedasExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getMonedas(auth);
+  async getMonedasExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getMonedas(auth, callOpts);
   }
 
   /** Países destino de exportación. */
-  async getPaisesExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getPaises(auth);
+  async getPaisesExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getPaises(auth, callOpts);
   }
 
   /** Idiomas disponibles (WSFEX). */
-  async getIdiomasExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getIdiomas(auth);
+  async getIdiomasExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getIdiomas(auth, callOpts);
   }
 
   /** Incoterms disponibles. */
-  async getIncotermsExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getIncoterms(auth);
+  async getIncotermsExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getIncoterms(auth, callOpts);
   }
 
   /** Unidades de medida (WSFEX). */
-  async getUMedExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getUMed(auth);
+  async getUMedExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getUMed(auth, callOpts);
   }
 
   /** Tipos de exportación. */
-  async getTiposExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getTiposExpo(auth);
+  async getTiposExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getTiposExpo(auth, callOpts);
   }
 
   /** CUITs de países. */
-  async getCuitsPaisExpo(): Promise<WsfexParamItem[]> {
-    const auth = await this.getAuth("wsfex");
-    return this.wsfex.getCuitsPais(auth);
+  async getCuitsPaisExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
+    return this.wsfex.getCuitsPais(auth, callOpts);
   }
 
   /**
    * Crea una factura de exportación con API simplificada.
    * Obtiene automáticamente el ID y número de comprobante.
    */
-  async facturarExpo(opts: FacturarExpoOpts): Promise<FacturaExpoResult> {
+  async facturarExpo(opts: FacturarExpoOpts, call?: CallOptions): Promise<FacturaExpoResult> {
     validateFacturarExpoOpts(opts);
-    const auth = await this.getAuth("wsfex");
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfex", callOpts);
     const [lastId, nextNum] = await Promise.all([
-      this.wsfex.getLastId(auth),
-      this.wsfex.getLastCmp(auth, opts.ptoVta, opts.cbteTipo).then((n) => n + 1),
+      this.wsfex.getLastId(auth, callOpts),
+      this.wsfex.getLastCmp(auth, opts.ptoVta, opts.cbteTipo, callOpts).then((n) => n + 1),
     ]);
 
-    const fecha = opts.fecha ? toDateString(opts.fecha) : toDateString(new Date());
+    const fecha = toDateString(opts.fecha ?? this.wsaa.now());
 
     const items = opts.items.map((item) => ({
       Pro_codigo: item.codigo,
@@ -429,7 +510,9 @@ export class Arca {
     if (opts.cbtesAsoc) invoice.Cmps_asoc = opts.cbtesAsoc;
     if (opts.canMisMonExt) invoice.CanMisMonExt = opts.canMisMonExt;
 
-    const result = await this.wsfex.authorize(auth, invoice);
+    // Emisión: no se reintenta. Un ArcaSoapError con `uncertain: true` significa que
+    // no se sabe si quedó autorizada: verificar con consultarComprobanteExpo.
+    const result = await this.wsfex.authorize(auth, invoice, callOpts);
     const authResult = result.FEXResultAuth;
     const aprobada = authResult?.Resultado === "A";
 
@@ -456,27 +539,30 @@ export class Arca {
    */
   async solicitarCAEA(
     periodo: string,
-    orden: number
+    orden: number,
+    call?: CallOptions
   ): Promise<CaeaSolicitarResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.solicitarCAEA(auth, periodo, orden);
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.solicitarCAEA(auth, periodo, orden, callOpts);
   }
 
   /** Consulta un CAEA previamente solicitado. */
   async consultarCAEA(
     periodo: string,
-    orden: number
+    orden: number,
+    call?: CallOptions
   ): Promise<CaeaSolicitarResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.consultarCAEA(auth, periodo, orden);
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.consultarCAEA(auth, periodo, orden, callOpts);
   }
 
   /** Informa comprobantes emitidos con un CAEA. */
-  async registrarCAEA(
-    request: CaeaRegInfRequest
-  ): Promise<CaeaRegInfResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.registrarCAEA(auth, request);
+  async registrarCAEA(request: CaeaRegInfRequest, call?: CallOptions): Promise<CaeaRegInfResult> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.registrarCAEA(auth, request, callOpts);
   }
 
   /**
@@ -497,18 +583,19 @@ export class Arca {
    */
   async registrarFacturaCAEA(
     caea: string,
-    opts: FacturarOpts
+    opts: FacturarOpts,
+    call?: CallOptions
   ): Promise<FacturaResult> {
     if (!caea) throw new ArcaError("Validación: caea es requerido");
     validateFacturarOpts(opts);
-    const nextNum = await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo);
-    const { detail, importes } = buildInvoiceDetail(opts, nextNum);
+    const cbteNro = opts.cbteNro ?? (await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo, call));
+    const { request, importes } = this.armarComprobante({ ...opts, cbteNro });
 
     const result = await this.registrarCAEA({
       PtoVta: opts.ptoVta,
       CbteTipo: opts.cbteTipo,
-      invoices: [{ ...detail, CAEA: caea }],
-    });
+      invoices: [{ ...request, CAEA: caea }],
+    }, call);
 
     // CaeaRegInfResult usa FECAEADetResponse, adaptar para parseFacturaResult
     const adapted = {
@@ -523,10 +610,12 @@ export class Arca {
   /** Informa que no hubo movimientos para un CAEA en un punto de venta. */
   async sinMovimientoCAEA(
     caea: string,
-    ptoVta: number
+    ptoVta: number,
+    call?: CallOptions
   ): Promise<CaeaSinMovResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.sinMovimientoCAEA(auth, caea, ptoVta);
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.sinMovimientoCAEA(auth, caea, ptoVta, callOpts);
   }
 
   // ============================================================
@@ -534,22 +623,29 @@ export class Arca {
   // ============================================================
 
   /**
-   * Consulta datos de un contribuyente por CUIT (padrón A13 - básico).
-   * Retorna nombre, tipo de persona, estado, impuestos.
+   * Consulta datos de un contribuyente por CUIT (padrón A13).
+   * Requiere cert con acceso a `ws_sr_padron_a13`.
+   *
+   * @deprecated Usar `@ramiidv/arca-padron` (`ArcaPadron.getPersonaA13`).
    */
-  async consultarCuit(cuit: number): Promise<Contribuyente> {
-    const auth = await this.getAuth("ws_sr_padron_a13");
-    return this.padron.getPersonaA13(auth, cuit);
+  async consultarCuit(cuit: number, call?: CallOptions): Promise<Contribuyente> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth(PADRON_A13_SERVICE, callOpts);
+    return this.padron.getPersonaA13(auth, cuit, callOpts);
   }
 
   /**
-   * Consulta datos detallados de un contribuyente (padrón A5).
-   * Requiere autorización adicional en el certificado.
-   * Incluye domicilio fiscal, actividades, etc.
+   * Consulta la constancia de inscripción de un contribuyente (ex padrón A5):
+   * domicilio fiscal e impuestos. Requiere cert con acceso a
+   * `ws_sr_constancia_inscripcion`.
+   *
+   * @deprecated Usar `@ramiidv/arca-padron` (`ArcaPadron.getConstanciaInscripcion`
+   * y `condicionIvaDesdePadron`).
    */
-  async consultarCuitDetalle(cuit: number): Promise<Contribuyente> {
-    const auth = await this.getAuth(PADRON_A5_SERVICE);
-    return this.padron.getPersonaA5(auth, cuit);
+  async consultarCuitDetalle(cuit: number, call?: CallOptions): Promise<Contribuyente> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth(PADRON_A5_SERVICE, callOpts);
+    return this.padron.getPersonaA5(auth, cuit, callOpts);
   }
 
   // ============================================================
@@ -569,92 +665,103 @@ export class Arca {
   }
 
   /** Estado de los servidores WSFE. No requiere autenticación. */
-  async serverStatus(): Promise<ServerStatus> {
-    return this.wsfe.serverStatus();
+  async serverStatus(call?: CallOptions): Promise<ServerStatus> {
+    return this.wsfe.serverStatus(this.opts(call));
   }
 
   /** Tipos de comprobante disponibles. Cacheado. */
-  async getTiposComprobante(): Promise<ParamItem[]> {
+  async getTiposComprobante(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposCbte", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposComprobante(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposComprobante(auth, callOpts);
     });
   }
 
   /** Tipos de concepto (Productos, Servicios, Ambos). Cacheado. */
-  async getTiposConcepto(): Promise<ParamItem[]> {
+  async getTiposConcepto(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposConcepto", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposConcepto(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposConcepto(auth, callOpts);
     });
   }
 
   /** Tipos de documento disponibles (CUIT, DNI, etc.). Cacheado. */
-  async getTiposDocumento(): Promise<ParamItem[]> {
+  async getTiposDocumento(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposDoc", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposDocumento(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposDocumento(auth, callOpts);
     });
   }
 
   /** Condiciones de IVA válidas para el receptor. Cacheado. */
-  async getCondicionesIva(): Promise<ParamItem[]> {
+  async getCondicionesIva(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("condicionesIva", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getCondicionesIva(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getCondicionesIva(auth, callOpts);
     });
   }
 
   /** Alícuotas de IVA disponibles (0%, 2.5%, 5%, 10.5%, 21%, 27%). Cacheado. */
-  async getTiposIva(): Promise<ParamItem[]> {
+  async getTiposIva(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposIva", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposIva(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposIva(auth, callOpts);
     });
   }
 
   /** Monedas disponibles. Cacheado. */
-  async getMonedas(): Promise<MonedaItem[]> {
+  async getMonedas(call?: CallOptions): Promise<MonedaItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("monedas", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getMonedas(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getMonedas(auth, callOpts);
     });
   }
 
   /** Tipos de tributo disponibles. Cacheado. */
-  async getTiposTributo(): Promise<ParamItem[]> {
+  async getTiposTributo(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposTrib", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposTributo(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposTributo(auth, callOpts);
     });
   }
 
   /** Tipos de datos opcionales disponibles. Cacheado. */
-  async getTiposOpcional(): Promise<ParamItem[]> {
+  async getTiposOpcional(call?: CallOptions): Promise<ParamItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("tiposOpc", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getTiposOpcional(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getTiposOpcional(auth, callOpts);
     });
   }
 
   /** Puntos de venta habilitados. Cacheado. */
-  async getPuntosVenta(): Promise<PtoVentaItem[]> {
+  async getPuntosVenta(call?: CallOptions): Promise<PtoVentaItem[]> {
+    const callOpts = this.opts(call);
     return this.cachedParam("ptosVenta", async () => {
-      const auth = await this.getAuth();
-      return this.wsfe.getPuntosVenta(auth);
+      const auth = await this.getAuth("wsfe", callOpts);
+      return this.wsfe.getPuntosVenta(auth, callOpts);
     });
   }
 
   /** Cotización de una moneda. No cacheado (cambia frecuentemente). */
-  async getCotizacion(monedaId: string): Promise<CotizacionResult> {
-    const auth = await this.getAuth();
-    return this.wsfe.getCotizacion(auth, monedaId);
+  async getCotizacion(monedaId: string, call?: CallOptions): Promise<CotizacionResult> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.getCotizacion(auth, monedaId, callOpts);
   }
 
-  /** Cantidad máxima de registros por request de FECAESolicitar. Cacheado. */
-  async getCantMaxRegistros(): Promise<number> {
-    const auth = await this.getAuth();
-    return this.wsfe.getCantMaxRegistros(auth);
+  /** Cantidad máxima de registros por request de FECAESolicitar. */
+  async getCantMaxRegistros(call?: CallOptions): Promise<number> {
+    const callOpts = this.opts(call);
+    const auth = await this.getAuth("wsfe", callOpts);
+    return this.wsfe.getCantMaxRegistros(auth, callOpts);
   }
 
   // ============================================================
@@ -729,17 +836,16 @@ export class Arca {
   /** Calcula importes e IVA desde line items. Para previsualizar sin enviar. */
   static calcularTotales(
     items: LineItem[],
-    opts?: { tributos?: { Importe: number }[]; tipoC?: boolean }
+    opts?: { tributos?: { Importe: number }[]; tipoC?: boolean; descuentoGlobal?: number }
   ) {
     return calcularTotales(items, opts);
   }
 
-  /** Invalida los tickets de acceso cacheados. */
-  clearAuthCache(): void {
-    this.wsaa.clearTicket("wsfe");
-    this.wsaa.clearTicket("wsfex");
-    this.wsaa.clearTicket(PADRON_A5_SERVICE);
-    this.wsaa.clearTicket("ws_sr_padron_a13");
+  /** Invalida los tickets de acceso (en memoria y en el `ticketStorage`). */
+  async clearAuthCache(): Promise<void> {
+    await Promise.all(
+      ["wsfe", "wsfex", PADRON_A5_SERVICE, PADRON_A13_SERVICE].map((s) => this.wsaa.clearTicket(s))
+    );
   }
 
   /** Invalida el cache de parámetros (getTipos*, getMonedas, etc.). */

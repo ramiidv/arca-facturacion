@@ -1,18 +1,39 @@
 export { Arca } from "./arca.js";
 
+// Funciones puras (sin red)
+export {
+  armarComprobante,
+  calcularTotales,
+  intentoDesdeComprobante,
+  coincideConIntento,
+  facturaResultDesdeConsulta,
+  toDateString,
+} from "./facturacion.js";
+export { resolverCbteTipo } from "./cbte-tipo.js";
+export type { ClaseComprobante } from "./cbte-tipo.js";
+
 // Errors
 export {
   ArcaError,
   ArcaAuthError,
+  ArcaTicketVigenteError,
   ArcaWSFEError,
   ArcaSoapError,
+  ArcaValidationError,
+  ArcaResultadoIncierto,
 } from "./errors.js";
+export type { OperacionEmision } from "./errors.js";
+
+// Persistencia de tickets (desde arca-common)
+export { MemoryTicketStorage, FileTicketStorage } from "@ramiidv/arca-common";
 
 // Types
 export type {
   ArcaConfig,
   ArcaEvent,
   AccessTicket,
+  TicketStorage,
+  CallOptions,
   WsfeAuth,
   AlicuotaIva,
   Tributo,
@@ -34,12 +55,17 @@ export type {
   QRInput,
   // Simplified API
   LineItem,
+  LineItemNeto,
+  LineItemTotal,
   FacturarOpts,
   NotaCreditoOpts,
   NotaDebitoOpts,
   ComprobanteRef,
   FacturaResult,
   Importes,
+  IntentoComprobante,
+  ResultadoRecuperacion,
+  ComprobanteArmado,
   // WSFEX
   WsfexInvoice,
   WsfexItem,
@@ -83,4 +109,5 @@ export {
 export { WsaaClient } from "./wsaa.js";
 export { WsfeClient } from "./wsfe.js";
 export { WsfexClient } from "./wsfex.js";
+/** @deprecated Usar `@ramiidv/arca-padron`. */
 export { PadronClient } from "./padron.js";

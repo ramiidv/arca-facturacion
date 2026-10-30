@@ -1,7 +1,10 @@
 import { ENDPOINTS, WSFE_NAMESPACE } from "./constants.js";
 import { afipSoapCall, toArray } from "./soap-client.js";
 import type { SoapOptions } from "./soap-client.js";
-import { ArcaWSFEError } from "./errors.js";
+import { ArcaResultadoIncierto, ArcaSoapError, ArcaWSFEError } from "./errors.js";
+import type { OperacionEmision } from "./errors.js";
+import { intentoDesdeComprobante } from "./facturacion.js";
+import type { CallOptions, SoapOperationKind } from "@ramiidv/arca-common";
 import type {
   WsfeAuth,
   InvoiceRequest,
@@ -58,54 +61,103 @@ export class WsfeClient {
     };
   }
 
-  private call(method: string, params: Record<string, any>) {
-    return afipSoapCall(
-      this.endpoint,
-      WSFE_NAMESPACE,
-      method,
-      params,
-      this.soapOpts
-    );
+  private call(
+    method: string,
+    params: Record<string, any>,
+    opts?: CallOptions & { kind?: SoapOperationKind }
+  ) {
+    return afipSoapCall(this.endpoint, WSFE_NAMESPACE, method, params, {
+      ...this.soapOpts,
+      kind: opts?.kind,
+      signal: opts?.signal,
+    });
+  }
+
+  /**
+   * Llama a una operación de emisión: nunca se reintenta, y si no hay certeza
+   * de que ARCA no la procesó, lanza ArcaResultadoIncierto.
+   */
+  private async emitir<T extends { Errors?: WsfeResult["Errors"] }>(
+    operacion: OperacionEmision,
+    params: Record<string, any>,
+    request: { PtoVta: number; CbteTipo: number; invoices: InvoiceDetail[] },
+    detalleKey: "FECAEDetResponse" | "FECAEADetResponse",
+    opts?: CallOptions
+  ): Promise<T> {
+    const incierto = (cause: unknown) =>
+      new ArcaResultadoIncierto(
+        operacion,
+        request.invoices.map((inv) =>
+          intentoDesdeComprobante(request.PtoVta, request.CbteTipo, inv)
+        ),
+        { cause }
+      );
+
+    let result: T;
+    try {
+      result = (await this.call(operacion, params, { ...opts, kind: "emision" })) as T;
+    } catch (err) {
+      if (err instanceof ArcaSoapError && err.uncertain) throw incierto(err);
+      throw err;
+    }
+
+    // Errores de negocio: ARCA rechazó el request, no se emitió nada.
+    checkErrors(result);
+
+    const detResp = (result as { FeDetResp?: Record<string, unknown> }).FeDetResp;
+    if (!detResp || detResp[detalleKey] === undefined) {
+      throw incierto(new ArcaSoapError(`Respuesta de ${operacion} sin FeDetResp`));
+    }
+    return result;
   }
 
   // ============================================================
   // Facturación
   // ============================================================
 
+  /**
+   * Solicita CAE (emisión). No se reintenta: ante un resultado incierto lanza
+   * ArcaResultadoIncierto; ante errores de ARCA, ArcaWSFEError.
+   */
   async solicitarCAE(
     auth: WsfeAuth,
-    request: InvoiceRequest
+    request: InvoiceRequest,
+    opts?: CallOptions
   ): Promise<FECAESolicitarResult> {
     const detRequests = request.invoices.map((inv) =>
       this.buildDetRequest(inv)
     );
 
-    const result = (await this.call("FECAESolicitar", {
-      Auth: auth,
-      FeCAEReq: {
-        FeCabReq: {
-          CantReg: request.invoices.length,
-          PtoVta: request.PtoVta,
-          CbteTipo: request.CbteTipo,
+    return this.emitir<FECAESolicitarResult>(
+      "FECAESolicitar",
+      {
+        Auth: auth,
+        FeCAEReq: {
+          FeCabReq: {
+            CantReg: request.invoices.length,
+            PtoVta: request.PtoVta,
+            CbteTipo: request.CbteTipo,
+          },
+          FeDetReq: { FECAEDetRequest: detRequests },
         },
-        FeDetReq: { FECAEDetRequest: detRequests },
       },
-    })) as FECAESolicitarResult;
-
-    checkErrors(result);
-    return result;
+      request,
+      "FECAEDetResponse",
+      opts
+    );
   }
 
   async ultimoComprobante(
     auth: WsfeAuth,
     ptoVta: number,
-    cbteTipo: number
+    cbteTipo: number,
+    opts?: CallOptions
   ): Promise<number> {
     const result = (await this.call("FECompUltimoAutorizado", {
       Auth: auth,
       PtoVta: ptoVta,
       CbteTipo: cbteTipo,
-    })) as FECompUltimoAutorizadoResult;
+    }, opts)) as FECompUltimoAutorizadoResult;
     checkErrors(result);
     return Number(result.CbteNro);
   }
@@ -114,12 +166,13 @@ export class WsfeClient {
     auth: WsfeAuth,
     cbteTipo: number,
     ptoVta: number,
-    cbteNro: number
+    cbteNro: number,
+    opts?: CallOptions
   ): Promise<FECompConsultarResult> {
     const result = (await this.call("FECompConsultar", {
       Auth: auth,
       FeCompConsReq: { CbteTipo: cbteTipo, CbteNro: cbteNro, PtoVta: ptoVta },
-    })) as FECompConsultarResult;
+    }, opts)) as FECompConsultarResult;
     checkErrors(result);
     return result;
   }
@@ -128,72 +181,74 @@ export class WsfeClient {
   // Parámetros
   // ============================================================
 
-  async serverStatus(): Promise<ServerStatus> {
-    return (await this.call("FEDummy", {})) as ServerStatus;
+  async serverStatus(opts?: CallOptions): Promise<ServerStatus> {
+    return (await this.call("FEDummy", {}, opts)) as ServerStatus;
   }
 
   private async getParam<T>(
     auth: WsfeAuth,
     method: string,
-    itemKey: string
+    itemKey: string,
+    opts?: CallOptions
   ): Promise<T[]> {
-    const result = (await this.call(method, { Auth: auth })) as WsfeResult;
+    const result = (await this.call(method, { Auth: auth }, opts)) as WsfeResult;
     checkErrors(result);
     return toArray(result.ResultGet?.[itemKey] as T | T[] | undefined);
   }
 
-  async getTiposComprobante(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposCbte", "CbteTipo");
+  async getTiposComprobante(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposCbte", "CbteTipo", opts);
   }
 
-  async getTiposConcepto(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposConcepto", "ConceptoTipo");
+  async getTiposConcepto(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposConcepto", "ConceptoTipo", opts);
   }
 
-  async getTiposDocumento(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposDoc", "DocTipo");
+  async getTiposDocumento(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposDoc", "DocTipo", opts);
   }
 
-  async getCondicionesIva(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetCondicionIvaReceptor", "CondicionIVAReceptor");
+  async getCondicionesIva(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetCondicionIvaReceptor", "CondicionIVAReceptor", opts);
   }
 
-  async getTiposIva(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposIva", "IvaTipo");
+  async getTiposIva(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposIva", "IvaTipo", opts);
   }
 
-  async getMonedas(auth: WsfeAuth): Promise<MonedaItem[]> {
-    return this.getParam(auth, "FEParamGetTiposMonedas", "Moneda");
+  async getMonedas(auth: WsfeAuth, opts?: CallOptions): Promise<MonedaItem[]> {
+    return this.getParam(auth, "FEParamGetTiposMonedas", "Moneda", opts);
   }
 
-  async getTiposTributo(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposTributos", "TributoTipo");
+  async getTiposTributo(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposTributos", "TributoTipo", opts);
   }
 
-  async getTiposOpcional(auth: WsfeAuth): Promise<ParamItem[]> {
-    return this.getParam(auth, "FEParamGetTiposOpcional", "OpcionalTipo");
+  async getTiposOpcional(auth: WsfeAuth, opts?: CallOptions): Promise<ParamItem[]> {
+    return this.getParam(auth, "FEParamGetTiposOpcional", "OpcionalTipo", opts);
   }
 
-  async getPuntosVenta(auth: WsfeAuth): Promise<PtoVentaItem[]> {
-    return this.getParam(auth, "FEParamGetPtosVenta", "PtoVenta");
+  async getPuntosVenta(auth: WsfeAuth, opts?: CallOptions): Promise<PtoVentaItem[]> {
+    return this.getParam(auth, "FEParamGetPtosVenta", "PtoVenta", opts);
   }
 
   async getCotizacion(
     auth: WsfeAuth,
-    monedaId: string
+    monedaId: string,
+    opts?: CallOptions
   ): Promise<CotizacionResult> {
     const result = (await this.call("FEParamGetCotizacion", {
       Auth: auth,
       MonId: monedaId,
-    })) as WsfeResult & CotizacionResult;
+    }, opts)) as WsfeResult & CotizacionResult;
     checkErrors(result);
     return result;
   }
 
-  async getCantMaxRegistros(auth: WsfeAuth): Promise<number> {
+  async getCantMaxRegistros(auth: WsfeAuth, opts?: CallOptions): Promise<number> {
     const result = (await this.call("FECompTotXRequest", {
       Auth: auth,
-    })) as WsfeResult & { RegXReq?: number };
+    }, opts)) as WsfeResult & { RegXReq?: number };
     checkErrors(result);
     return Number(result.RegXReq ?? 0);
   }
@@ -205,13 +260,14 @@ export class WsfeClient {
   async solicitarCAEA(
     auth: WsfeAuth,
     periodo: string,
-    orden: number
+    orden: number,
+    opts?: CallOptions
   ): Promise<CaeaSolicitarResult> {
     const result = (await this.call("FECAEASolicitar", {
       Auth: auth,
       Periodo: periodo,
       Orden: orden,
-    })) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
+    }, opts)) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
     checkErrors(result);
     return result.ResultGet!;
   }
@@ -219,20 +275,26 @@ export class WsfeClient {
   async consultarCAEA(
     auth: WsfeAuth,
     periodo: string,
-    orden: number
+    orden: number,
+    opts?: CallOptions
   ): Promise<CaeaSolicitarResult> {
     const result = (await this.call("FECAEAConsultar", {
       Auth: auth,
       Periodo: periodo,
       Orden: orden,
-    })) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
+    }, opts)) as WsfeResult & { ResultGet?: CaeaSolicitarResult };
     checkErrors(result);
     return result.ResultGet!;
   }
 
+  /**
+   * Informa comprobantes emitidos con CAEA (emisión). No se reintenta: ante un
+   * resultado incierto lanza ArcaResultadoIncierto.
+   */
   async registrarCAEA(
     auth: WsfeAuth,
-    request: CaeaRegInfRequest
+    request: CaeaRegInfRequest,
+    opts?: CallOptions
   ): Promise<CaeaRegInfResult> {
     const detRequests = request.invoices.map((inv) => {
       const det = this.buildDetRequest(inv);
@@ -240,31 +302,38 @@ export class WsfeClient {
       return det;
     });
 
-    const result = (await this.call("FECAEARegInformativo", {
-      Auth: auth,
-      FeCAEARegInfReq: {
-        FeCabReq: {
-          CantReg: request.invoices.length,
-          PtoVta: request.PtoVta,
-          CbteTipo: request.CbteTipo,
+    return this.emitir<CaeaRegInfResult>(
+      "FECAEARegInformativo",
+      {
+        Auth: auth,
+        FeCAEARegInfReq: {
+          FeCabReq: {
+            CantReg: request.invoices.length,
+            PtoVta: request.PtoVta,
+            CbteTipo: request.CbteTipo,
+          },
+          FeDetReq: { FECAEADetRequest: detRequests },
         },
-        FeDetReq: { FECAEADetRequest: detRequests },
       },
-    })) as CaeaRegInfResult;
-    checkErrors(result);
-    return result;
+      request,
+      "FECAEADetResponse",
+      opts
+    );
   }
 
   async sinMovimientoCAEA(
     auth: WsfeAuth,
     caea: string,
-    ptoVta: number
+    ptoVta: number,
+    opts?: CallOptions
   ): Promise<CaeaSinMovResult> {
+    // Emisión: no se reintenta. Un error de transporte con `uncertain: true`
+    // significa que no se sabe si quedó informado (consultarlo con FECAEASinMovimientoConsultar).
     const result = (await this.call("FECAEASinMovimientoInformar", {
       Auth: auth,
       CAEA: caea,
       PtoVta: ptoVta,
-    })) as CaeaSinMovResult;
+    }, { ...opts, kind: "emision" })) as CaeaSinMovResult;
     checkErrors(result);
     return result;
   }
