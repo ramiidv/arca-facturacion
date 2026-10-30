@@ -2,6 +2,7 @@ import { ENDPOINTS, WSFEX_NAMESPACE } from "./constants.js";
 import { afipSoapCall, toArray } from "./soap-client.js";
 import type { SoapOptions } from "./soap-client.js";
 import { ArcaWSFEError } from "./errors.js";
+import type { CallOptions, SoapOperationKind } from "@ramiidv/arca-common";
 import type {
   WsfeAuth,
   WsfexInvoice,
@@ -48,14 +49,16 @@ export class WsfexClient {
     };
   }
 
-  private call(method: string, params: Record<string, any>) {
-    return afipSoapCall(
-      this.endpoint,
-      WSFEX_NAMESPACE,
-      method,
-      params,
-      this.soapOpts
-    );
+  private call(
+    method: string,
+    params: Record<string, any>,
+    opts?: CallOptions & { kind?: SoapOperationKind }
+  ) {
+    return afipSoapCall(this.endpoint, WSFEX_NAMESPACE, method, params, {
+      ...this.soapOpts,
+      kind: opts?.kind,
+      signal: opts?.signal,
+    });
   }
 
   // ============================================================
@@ -63,11 +66,14 @@ export class WsfexClient {
   // ============================================================
 
   /**
-   * Autoriza un comprobante de exportación.
+   * Autoriza un comprobante de exportación (emisión). No se reintenta: si el
+   * resultado es incierto, el error es `ArcaSoapError` con `uncertain: true`;
+   * verificar con `getCmp` antes de volver a enviar.
    */
   async authorize(
     auth: WsfeAuth,
-    invoice: WsfexInvoice
+    invoice: WsfexInvoice,
+    opts?: CallOptions
   ): Promise<WsfexAuthResult> {
     const cmp: Record<string, any> = { ...invoice };
 
@@ -89,7 +95,7 @@ export class WsfexClient {
     const result = (await this.call("FEXAuthorize", {
       Auth: auth,
       Cmp: cmp,
-    })) as WsfexAuthResult;
+    }, { ...opts, kind: "emision" })) as WsfexAuthResult;
 
     checkFexErr(result);
     return result;
@@ -101,7 +107,8 @@ export class WsfexClient {
   async getLastCmp(
     auth: WsfeAuth,
     ptoVta: number,
-    cbteTipo: number
+    cbteTipo: number,
+    opts?: CallOptions
   ): Promise<number> {
     const result = (await this.call("FEXGetLast_CMP", {
       Auth: {
@@ -111,7 +118,7 @@ export class WsfexClient {
         Pto_venta: ptoVta,
         Cbte_Tipo: cbteTipo,
       },
-    })) as WsfexLastCmpResult;
+    }, opts)) as WsfexLastCmpResult;
     checkFexErr(result);
     return Number(result.FEXResult_LastCMP?.Cbte_nro ?? 0);
   }
@@ -119,10 +126,10 @@ export class WsfexClient {
   /**
    * Obtiene el último ID de request.
    */
-  async getLastId(auth: WsfeAuth): Promise<number> {
+  async getLastId(auth: WsfeAuth, opts?: CallOptions): Promise<number> {
     const result = (await this.call("FEXGetLast_ID", {
       Auth: auth,
-    })) as WsfexLastIdResult;
+    }, opts)) as WsfexLastIdResult;
     checkFexErr(result);
     return Number(result.FEXResultGet?.Id ?? 0);
   }
@@ -134,12 +141,13 @@ export class WsfexClient {
     auth: WsfeAuth,
     cbteTipo: number,
     ptoVta: number,
-    cbteNro: number
+    cbteNro: number,
+    opts?: CallOptions
   ): Promise<WsfexGetCmpResult> {
     const result = (await this.call("FEXGetCMP", {
       Auth: auth,
       Cmp: { Cbte_tipo: cbteTipo, Punto_vta: ptoVta, Cbte_nro: cbteNro },
-    })) as WsfexGetCmpResult;
+    }, opts)) as WsfexGetCmpResult;
     checkFexErr(result);
     return result;
   }
@@ -147,8 +155,8 @@ export class WsfexClient {
   /**
    * Verifica el estado de los servidores de WSFEX.
    */
-  async serverStatus(): Promise<ServerStatus> {
-    return (await this.call("FEXDummy", {})) as ServerStatus;
+  async serverStatus(opts?: CallOptions): Promise<ServerStatus> {
+    return (await this.call("FEXDummy", {}, opts)) as ServerStatus;
   }
 
   // ============================================================
@@ -159,9 +167,10 @@ export class WsfexClient {
     auth: WsfeAuth,
     method: string,
     resultKey: string,
-    itemKey: string
+    itemKey: string,
+    opts?: CallOptions
   ): Promise<T[]> {
-    const result = (await this.call(method, { Auth: auth })) as Record<
+    const result = (await this.call(method, { Auth: auth }, opts)) as Record<
       string,
       any
     >;
@@ -171,82 +180,90 @@ export class WsfexClient {
   }
 
   /** Tipos de comprobante de exportación. */
-  async getTiposCbte(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getTiposCbte(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_Cbte_Tipo",
       "FEXResultGet",
-      "ClsFEXResponse_Cbte_Tipo"
+      "ClsFEXResponse_Cbte_Tipo",
+      opts
     );
   }
 
   /** Monedas disponibles. */
-  async getMonedas(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getMonedas(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_MON",
       "FEXResultGet",
-      "ClsFEXResponse_Mon"
+      "ClsFEXResponse_Mon",
+      opts
     );
   }
 
   /** Países destino. */
-  async getPaises(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getPaises(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_DST_Pais",
       "FEXResultGet",
-      "ClsFEXResponse_DST_pais"
+      "ClsFEXResponse_DST_pais",
+      opts
     );
   }
 
   /** Idiomas disponibles. */
-  async getIdiomas(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getIdiomas(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_Idiomas",
       "FEXResultGet",
-      "ClsFEXResponse_Idi"
+      "ClsFEXResponse_Idi",
+      opts
     );
   }
 
   /** Incoterms disponibles. */
-  async getIncoterms(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getIncoterms(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_Incoterms",
       "FEXResultGet",
-      "ClsFEXResponse_Inc"
+      "ClsFEXResponse_Inc",
+      opts
     );
   }
 
   /** Unidades de medida. */
-  async getUMed(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getUMed(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_UMed",
       "FEXResultGet",
-      "ClsFEXResponse_UMed"
+      "ClsFEXResponse_UMed",
+      opts
     );
   }
 
   /** Tipos de exportación. */
-  async getTiposExpo(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getTiposExpo(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_Tipo_Expo",
       "FEXResultGet",
-      "ClsFEXResponse_Tex"
+      "ClsFEXResponse_Tex",
+      opts
     );
   }
 
   /** CUITs de países. */
-  async getCuitsPais(auth: WsfeAuth): Promise<WsfexParamItem[]> {
+  async getCuitsPais(auth: WsfeAuth, opts?: CallOptions): Promise<WsfexParamItem[]> {
     return this.getParamList(
       auth,
       "FEXGetPARAM_DST_CUIT",
       "FEXResultGet",
-      "ClsFEXResponse_DST_cuit"
+      "ClsFEXResponse_DST_cuit",
+      opts
     );
   }
 }
