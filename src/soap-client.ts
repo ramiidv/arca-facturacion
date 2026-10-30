@@ -1,50 +1,8 @@
-import { XMLParser, XMLBuilder } from "fast-xml-parser";
-import { soapCall, extractMethodResult } from "@ramiidv/arca-common";
+import { soapCall, extractMethodResult, buildXml } from "@ramiidv/arca-common";
 import type { ArcaEvent, SoapOperationKind } from "@ramiidv/arca-common";
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-  textNodeName: "#text",
-  parseTagValue: true,
-  trimValues: true,
-  numberParseOptions: {
-    hex: false,
-    leadingZeros: false,
-    skipLike: /^\d{8,}$/,
-  },
-});
-
-const xmlBuilder = new XMLBuilder({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-  textNodeName: "#text",
-  format: true,
-  suppressEmptyNode: true,
-});
-
-/**
- * Parsea un string XML a objeto JS.
- */
-export function parseXml(xml: string): Record<string, any> {
-  return xmlParser.parse(xml);
-}
-
-/**
- * Construye XML desde un objeto JS.
- */
-export function buildXml(obj: Record<string, any>): string {
-  return xmlBuilder.build(obj);
-}
-
-/**
- * Normaliza un valor que puede ser un item, un array, o undefined a un array.
- * Útil para respuestas SOAP donde un solo elemento no viene wrapeado en array.
- */
-export function toArray<T>(val: T | T[] | undefined): T[] {
-  if (val === undefined || val === null) return [];
-  return Array.isArray(val) ? val : [val];
-}
+// Utilidades XML compartidas con el resto de los SDKs (mismas opciones de parseo).
+export { parseXml, buildXml, ensureArray as toArray } from "@ramiidv/arca-common";
 
 export interface SoapOptions {
   timeoutMs?: number;
