@@ -1,4 +1,5 @@
 import { IVA_RATES, Concepto, DocTipo, CondicionIva, Moneda, isTipoC } from "./constants.js";
+import { validateFacturarOpts } from "./validation.js";
 import type {
   LineItem,
   FacturarOpts,
@@ -7,11 +8,30 @@ import type {
   InvoiceDetail,
   AlicuotaIva,
   FECAESolicitarResult,
+  FECompConsultarResult,
   WsError,
+  ComprobanteArmado,
+  IntentoComprobante,
+  ComprobanteAsociado,
 } from "./types.js";
+import { toArray } from "./soap-client.js";
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
+/** Pasa un importe a centavos enteros (evita errores de punto flotante). */
+function toCents(n: number): number {
+  return Math.round(n * 100);
+}
+
+function fromCents(c: number): number {
+  return c / 100;
+}
+
+/** Alícuota en puntos básicos (21% → 2100, 10,5% → 1050) para operar con enteros. */
+function rateBasisPoints(ivaId: number): number {
+  const rate = IVA_RATES[ivaId as keyof typeof IVA_RATES];
+  if (rate === undefined) {
+    throw new Error(`Tipo de IVA desconocido: ${ivaId}`);
+  }
+  return Math.round(rate * 100);
 }
 
 /**
@@ -30,6 +50,24 @@ export function toDateString(d: Date | string): string {
     .replace(/-/g, "");
 }
 
+type BucketKey = number | "exento" | "noGravado" | "tipoC";
+
+interface Bucket {
+  key: BucketKey;
+  /** Alícuota en puntos básicos (0 para exento, no gravado y tipo C) */
+  rateBp: number;
+  /** Base informada por items con `neto` (centavos) */
+  netoCents: number;
+  /** Precio final informado por items con `total` (centavos) */
+  totalCents: number;
+}
+
+function itemAmountCents(item: LineItem): { neto: number; total: number } {
+  return item.total !== undefined
+    ? { neto: 0, total: toCents(item.total) }
+    : { neto: toCents(item.neto), total: 0 };
+}
+
 /**
  * Calcula los importes de una factura a partir de line items.
  *
@@ -38,109 +76,160 @@ export function toDateString(d: Date | string): string {
  * - Items sin `iva` ni `exento` → no gravados (ImpTotConc)
  * - Para comprobantes tipo C (monotributista): no discrimina IVA, todo va a ImpNeto
  *
- * @param items - Line items con importe neto
- * @param opts - Opciones: tributos y si es tipo C
+ * Cada item lleva `neto` (sin IVA) o `total` (IVA incluido). Con `total`, la
+ * base se despeja como `total / (1 + alícuota)` redondeada, y el IVA es la
+ * diferencia, así que base + IVA = total exacto.
+ *
+ * `descuentoGlobal` (monto final, IVA incluido) se prorratea entre alícuotas,
+ * exento y no gravado en proporción a su total; el resto de redondeo del
+ * prorrateo se asigna al grupo de mayor base. No afecta tributos.
+ *
+ * Todo se calcula en centavos enteros: la suma de BaseImp + Importe de todas
+ * las alícuotas + exento + no gravado + tributos es exactamente ImpTotal.
+ *
+ * @param items - Line items
+ * @param opts - Opciones: tributos, si es tipo C, y descuento global
  * @returns Importes calculados e array de alícuotas IVA
  */
 export function calcularTotales(
   items: LineItem[],
-  opts?: { tributos?: { Importe: number }[]; tipoC?: boolean }
+  opts?: { tributos?: { Importe: number }[]; tipoC?: boolean; descuentoGlobal?: number }
 ): { importes: Importes; iva: AlicuotaIva[] } {
   const tipoC = opts?.tipoC ?? false;
+  const buckets = new Map<BucketKey, Bucket>();
 
-  // Para tipo C, no discriminar IVA: todo va a ImpNeto
-  if (tipoC) {
-    let impNeto = 0;
-    for (const item of items) {
-      impNeto = round2(impNeto + item.neto);
+  const bucketFor = (key: BucketKey, rateBp: number): Bucket => {
+    let b = buckets.get(key);
+    if (!b) {
+      b = { key, rateBp, netoCents: 0, totalCents: 0 };
+      buckets.set(key, b);
     }
-    let impTrib = 0;
-    if (opts?.tributos) {
-      for (const t of opts.tributos) {
-        impTrib = round2(impTrib + t.Importe);
-      }
+    return b;
+  };
+
+  for (const item of items) {
+    const { neto, total } = itemAmountCents(item);
+    let bucket: Bucket;
+    if (tipoC) {
+      bucket = bucketFor("tipoC", 0);
+    } else if (item.exento) {
+      bucket = bucketFor("exento", 0);
+    } else if (item.iva !== undefined) {
+      bucket = bucketFor(item.iva, rateBasisPoints(item.iva));
+    } else {
+      bucket = bucketFor("noGravado", 0);
     }
-    const impTotal = round2(impNeto + impTrib);
-    return {
-      importes: {
-        total: impTotal,
-        neto: impNeto,
-        iva: 0,
-        exento: 0,
-        noGravado: 0,
-        tributos: impTrib,
-      },
-      iva: [],
-    };
+    bucket.netoCents += neto;
+    bucket.totalCents += total;
   }
+
+  const list = [...buckets.values()];
+
+  // Precio final de cada grupo antes del descuento.
+  const finals = list.map((b) => {
+    const ivaSobreNeto = Math.round((b.netoCents * b.rateBp) / 10_000);
+    return b.netoCents + ivaSobreNeto + b.totalCents;
+  });
+  // Base de cada grupo antes del descuento (para elegir el grupo que absorbe el resto).
+  const basesPrevias = list.map((b) => b.netoCents + baseDesdeTotal(b.totalCents, b.rateBp));
+
+  const descuentoCents = toCents(opts?.descuentoGlobal ?? 0);
+  const shares = prorratear(descuentoCents, finals, basesPrevias);
 
   let impNeto = 0;
   let impIVA = 0;
   let impOpEx = 0;
   let impTotConc = 0;
-  const ivaMap = new Map<number, { baseImp: number; importe: number }>();
+  const ivaArray: AlicuotaIva[] = [];
 
-  for (const item of items) {
-    if (item.exento) {
-      impOpEx = round2(impOpEx + item.neto);
-    } else if (item.iva !== undefined) {
-      impNeto = round2(impNeto + item.neto);
-      const rate = IVA_RATES[item.iva as keyof typeof IVA_RATES];
-      if (rate === undefined) {
-        throw new Error(`Tipo de IVA desconocido: ${item.iva}`);
-      }
-      const ivaAmount = round2((item.neto * rate) / 100);
-      impIVA = round2(impIVA + ivaAmount);
-
-      const existing = ivaMap.get(item.iva);
-      if (existing) {
-        existing.baseImp = round2(existing.baseImp + item.neto);
-        existing.importe = round2(existing.importe + ivaAmount);
-      } else {
-        ivaMap.set(item.iva, { baseImp: item.neto, importe: ivaAmount });
-      }
+  list.forEach((b, i) => {
+    let base: number;
+    let iva: number;
+    if (descuentoCents > 0) {
+      const final = finals[i] - shares[i];
+      base = baseDesdeTotal(final, b.rateBp);
+      iva = final - base;
     } else {
-      // No gravado
-      impTotConc = round2(impTotConc + item.neto);
+      base = basesPrevias[i];
+      iva = finals[i] - base;
     }
-  }
+
+    if (b.key === "tipoC") {
+      impNeto += base;
+    } else if (b.key === "exento") {
+      impOpEx += base;
+    } else if (b.key === "noGravado") {
+      impTotConc += base;
+    } else {
+      impNeto += base;
+      impIVA += iva;
+      if (base !== 0 || iva !== 0 || descuentoCents === 0) {
+        ivaArray.push({ Id: b.key, BaseImp: fromCents(base), Importe: fromCents(iva) });
+      }
+    }
+  });
 
   let impTrib = 0;
-  if (opts?.tributos) {
-    for (const t of opts.tributos) {
-      impTrib = round2(impTrib + t.Importe);
-    }
+  for (const t of opts?.tributos ?? []) {
+    impTrib += toCents(t.Importe);
   }
 
-  const impTotal = round2(impNeto + impIVA + impOpEx + impTotConc + impTrib);
+  const impTotal = impNeto + impIVA + impOpEx + impTotConc + impTrib;
 
-  const ivaArray: AlicuotaIva[] = Array.from(ivaMap.entries()).map(
-    ([id, { baseImp, importe }]) => ({
-      Id: id,
-      BaseImp: baseImp,
-      Importe: importe,
-    })
-  );
-
-  return {
-    importes: {
-      total: impTotal,
-      neto: impNeto,
-      iva: impIVA,
-      exento: impOpEx,
-      noGravado: impTotConc,
-      tributos: impTrib,
-    },
-    iva: ivaArray,
+  const importes: Importes = {
+    total: fromCents(impTotal),
+    neto: fromCents(impNeto),
+    iva: fromCents(impIVA),
+    exento: fromCents(impOpEx),
+    noGravado: fromCents(impTotConc),
+    tributos: fromCents(impTrib),
   };
+  if (descuentoCents > 0) importes.descuento = fromCents(descuentoCents);
+
+  return { importes, iva: ivaArray };
+}
+
+/** Despeja la base de un precio final: total / (1 + alícuota), redondeada al centavo. */
+function baseDesdeTotal(totalCents: number, rateBp: number): number {
+  if (rateBp === 0) return totalCents;
+  return Math.round((totalCents * 10_000) / (10_000 + rateBp));
+}
+
+/**
+ * Reparte `monto` centavos en proporción a `pesos`. El resto de redondeo va al
+ * índice de mayor `base`. Usa BigInt para no perder precisión con montos grandes.
+ */
+function prorratear(monto: number, pesos: number[], bases: number[]): number[] {
+  const shares = pesos.map(() => 0);
+  if (monto === 0) return shares;
+  const totalPesos = pesos.reduce((a, b) => a + b, 0);
+  if (totalPesos <= 0) return shares;
+
+  let asignado = 0;
+  pesos.forEach((p, i) => {
+    shares[i] = Number((BigInt(monto) * BigInt(p)) / BigInt(totalPesos));
+    asignado += shares[i];
+  });
+
+  let mayor = 0;
+  bases.forEach((b, i) => {
+    if (b > bases[mayor]) mayor = i;
+  });
+  shares[mayor] += monto - asignado;
+  return shares;
 }
 
 /**
  * Construye un InvoiceDetail a partir de FacturarOpts y un número de comprobante.
+ * No valida: usar `armarComprobante` para validar y armar.
+ *
+ * @param ahora - Fecha a usar si `opts.fecha` no viene (default: ahora). Permite
+ *   aplicar el desfase de reloj.
  */
 export function buildInvoiceDetail(
   opts: FacturarOpts,
-  cbteNum: number
+  cbteNum: number,
+  ahora: Date = new Date()
 ): { detail: InvoiceDetail; importes: Importes } {
   const esServicio = opts.servicio !== undefined;
   const concepto =
@@ -150,9 +239,10 @@ export function buildInvoiceDetail(
   const { importes, iva: ivaArray } = calcularTotales(opts.items, {
     tributos: opts.tributos,
     tipoC,
+    descuentoGlobal: opts.descuentoGlobal,
   });
 
-  const fecha = opts.fecha ? toDateString(opts.fecha) : toDateString(new Date());
+  const fecha = toDateString(opts.fecha ?? ahora);
 
   const detail: InvoiceDetail = {
     Concepto: concepto,
@@ -171,7 +261,8 @@ export function buildInvoiceDetail(
     MonCotiz: opts.cotizacion ?? 1,
   };
 
-  // CondicionIVAReceptorId: obligatorio desde abril 2026
+  // CondicionIVAReceptorId: obligatorio según RG 5616 (ARCA rechaza sin él desde el
+  // 01/12/2026). Solo se completa por defecto para consumidor final sin identificar.
   const docTipo = opts.docTipo ?? DocTipo.CONSUMIDOR_FINAL;
   if (opts.condicionIva != null) {
     detail.CondicionIVAReceptorId = opts.condicionIva;
@@ -198,11 +289,91 @@ export function buildInvoiceDetail(
     detail.Tributos = opts.tributos;
   }
 
+  if (opts.cbtesAsoc && opts.cbtesAsoc.length > 0) {
+    detail.CbtesAsoc = opts.cbtesAsoc.map(
+      (c): ComprobanteAsociado => ({
+        Tipo: c.tipo,
+        PtoVta: c.ptoVta,
+        Nro: c.nro,
+        ...(c.cuit !== undefined && { Cuit: c.cuit }),
+        ...(c.fecha !== undefined && { CbteFch: toDateString(c.fecha) }),
+      })
+    );
+  }
+
   if (opts.opcionales && opts.opcionales.length > 0) {
     detail.Opcionales = opts.opcionales;
   }
 
   return { detail, importes };
+}
+
+/**
+ * Valida y arma un comprobante listo para enviar, sin tocar la red.
+ *
+ * Devuelve también el `intento`: persistilo antes de enviar, y si el proceso se
+ * cae o el resultado es incierto, pasalo a `recuperarComprobante`.
+ *
+ * @example
+ * ```ts
+ * const { request, importes, intento } = armarComprobante({
+ *   ptoVta: 1, cbteTipo: CbteTipo.FACTURA_B, cbteNro: 151,
+ *   items: [{ total: 1210, iva: IvaTipo.IVA_21 }],
+ * });
+ * ```
+ */
+export function armarComprobante(
+  opts: FacturarOpts & { cbteNro: number },
+  ctx?: { ahora?: Date }
+): ComprobanteArmado {
+  validateFacturarOpts(opts);
+  const { detail, importes } = buildInvoiceDetail(opts, opts.cbteNro, ctx?.ahora);
+  return {
+    request: detail,
+    importes,
+    intento: intentoDesdeComprobante(opts.ptoVta, opts.cbteTipo, detail),
+  };
+}
+
+/** Arma el `IntentoComprobante` de un detalle ya armado (ej: uno persistido). */
+export function intentoDesdeComprobante(
+  ptoVta: number,
+  cbteTipo: number,
+  detail: InvoiceDetail
+): IntentoComprobante {
+  return {
+    ptoVta,
+    cbteTipo,
+    cbteNro: detail.CbteDesde,
+    importeTotal: detail.ImpTotal,
+    docTipo: detail.DocTipo,
+    docNro: Number(detail.DocNro),
+    fecha: detail.CbteFch,
+  };
+}
+
+/**
+ * Compara un comprobante consultado en ARCA con un intento de emisión.
+ * Coincide si son iguales DocTipo, DocNro, CbteFch e ImpTotal (con tolerancia
+ * de 0,01) y el comprobante está aprobado.
+ */
+export function coincideConIntento(
+  consulta: FECompConsultarResult,
+  intento: IntentoComprobante
+): boolean {
+  const r = consulta.ResultGet;
+  if (!r) return false;
+  return (
+    (r.Resultado === undefined || r.Resultado === "A") &&
+    Math.abs(Number(r.ImpTotal) - intento.importeTotal) <= 0.01 + 1e-9 &&
+    Number(r.DocTipo) === Number(intento.docTipo) &&
+    Number(r.DocNro) === Number(intento.docNro) &&
+    String(r.CbteFch) === String(intento.fecha)
+  );
+}
+
+function parseObservaciones(obs?: { Obs: WsError | WsError[] }): { code: number; msg: string }[] {
+  return toArray(obs?.Obs).map((o) => ({ code: Number(o.Code), msg: String(o.Msg) }));
 }
 
 /**
@@ -219,25 +390,42 @@ export function parseFacturaResult(
   const det = detArr[0];
   const aprobada = det.Resultado === "A";
 
-  const observaciones: { code: number; msg: string }[] = [];
-  if (det.Observaciones) {
-    const obs: WsError[] = Array.isArray(det.Observaciones.Obs)
-      ? det.Observaciones.Obs
-      : [det.Observaciones.Obs];
-    for (const o of obs) {
-      observaciones.push({ code: o.Code, msg: o.Msg });
-    }
-  }
-
   return {
     aprobada,
-    cae: aprobada ? det.CAE : undefined,
-    caeVencimiento: aprobada ? det.CAEFchVto : undefined,
+    cae: aprobada ? String(det.CAE) : undefined,
+    caeVencimiento: aprobada ? String(det.CAEFchVto) : undefined,
     cbteNro: Number(det.CbteDesde),
     ptoVta: Number(result.FeCabResp.PtoVta),
     cbteTipo: Number(result.FeCabResp.CbteTipo),
     importes,
-    observaciones,
+    observaciones: parseObservaciones(det.Observaciones),
     raw: result,
+  };
+}
+
+/**
+ * Arma un FacturaResult a partir de un comprobante consultado con FECompConsultar
+ * (lo usa `recuperarComprobante`).
+ */
+export function facturaResultDesdeConsulta(consulta: FECompConsultarResult): FacturaResult {
+  const r = consulta.ResultGet;
+  const aprobada = r.Resultado === undefined || r.Resultado === "A";
+  return {
+    aprobada,
+    cae: aprobada ? String(r.CodAutorizacion) : undefined,
+    caeVencimiento: aprobada ? String(r.FchVto) : undefined,
+    cbteNro: Number(r.CbteDesde),
+    ptoVta: Number(r.PtoVta),
+    cbteTipo: Number(r.CbteTipo),
+    importes: {
+      total: Number(r.ImpTotal),
+      neto: Number(r.ImpNeto),
+      iva: Number(r.ImpIVA),
+      exento: Number(r.ImpOpEx),
+      noGravado: Number(r.ImpTotConc),
+      tributos: Number(r.ImpTrib),
+    },
+    observaciones: parseObservaciones(r.Observaciones),
+    raw: consulta,
   };
 }

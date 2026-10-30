@@ -1,6 +1,6 @@
 // Re-export from common
-export type { AccessTicket, ArcaEvent } from '@ramiidv/arca-common';
-import type { ArcaEvent } from '@ramiidv/arca-common';
+export type { AccessTicket, ArcaEvent, TicketStorage, CallOptions } from '@ramiidv/arca-common';
+import type { ArcaEvent, TicketStorage, WsaaClient } from '@ramiidv/arca-common';
 
 // ============================================================
 // Configuración
@@ -19,7 +19,11 @@ export interface ArcaConfig {
   tokenTTLMinutes?: number;
   /** Timeout para requests HTTP en milisegundos (default: 30000 = 30 segundos) */
   requestTimeoutMs?: number;
-  /** Cantidad de reintentos en caso de error transitorio (default: 1) */
+  /**
+   * Cantidad de reintentos en consultas ante errores transitorios (default: 1).
+   * Las emisiones (FECAESolicitar, FECAEARegInformativo, FECAEASinMovimientoInformar,
+   * FEXAuthorize) nunca se reintentan: ver `ArcaResultadoIncierto`.
+   */
   retries?: number;
   /** Delay inicial entre reintentos en milisegundos, se duplica con cada intento (default: 1000) */
   retryDelayMs?: number;
@@ -27,6 +31,25 @@ export interface ArcaConfig {
   onEvent?: (event: ArcaEvent) => void;
   /** TTL del cache de parámetros (getTipos*, getMonedas, etc.) en milisegundos. Default: 86400000 (24 horas). 0 para desactivar. */
   paramCacheTTLMs?: number;
+  /**
+   * Persistencia de Tickets de Acceso entre reinicios. Muy recomendado en
+   * producción: sin storage, al reiniciar el proceso WSAA rechaza el login
+   * hasta que venza el ticket anterior (`ArcaTicketVigenteError`).
+   */
+  ticketStorage?: TicketStorage;
+  /** Diferencia `relojARCA - relojLocal` en ms. Se usa en el login y en la fecha por defecto de los comprobantes. */
+  clockOffsetMs?: number;
+  /** Ajustar `clockOffsetMs` automáticamente si WSAA rechaza el login por reloj desfasado. Default: true. */
+  autoClockSkew?: boolean;
+  /** Signal global: cancela todas las llamadas de esta instancia (ej: al apagar la app). */
+  signal?: AbortSignal;
+  /**
+   * WsaaClient a usar en lugar de crear uno. Permite compartir los tickets con
+   * otras instancias (ej: `ArcaPadron`) que usan el mismo certificado.
+   * Si se provee, se ignoran `cert`, `key`, `tokenTTLMinutes`, `ticketStorage`,
+   * `clockOffsetMs` y `autoClockSkew`.
+   */
+  wsaa?: WsaaClient;
 }
 
 // ============================================================
@@ -128,7 +151,10 @@ export interface InvoiceDetail {
   CbtesAsoc?: ComprobanteAsociado[];
   /** Array de datos opcionales */
   Opcionales?: Opcional[];
-  /** Condición de IVA del receptor (usar enum CondicionIva). OBLIGATORIO desde abril 2026. */
+  /**
+   * Condición de IVA del receptor (usar enum CondicionIva). Obligatorio según RG 5616:
+   * ARCA rechaza los comprobantes sin este dato desde el 01/12/2026 (manual WSFEv1 v4.8).
+   */
   CondicionIVAReceptorId?: number;
   /** Cancela en misma moneda extranjera: "S" o "N". Requerido para operaciones en moneda extranjera (RG5616). */
   CanMisMonExt?: string;
@@ -216,6 +242,12 @@ export interface FECompConsultarResult {
     FchProceso: string;
     PtoVta: number;
     CbteTipo: number;
+    CondicionIVAReceptorId?: number;
+    Iva?: { AlicIva: AlicuotaIva | AlicuotaIva[] };
+    Tributos?: { Tributo: Tributo | Tributo[] };
+    CbtesAsoc?: { CbteAsoc: ComprobanteAsociado | ComprobanteAsociado[] };
+    Opcionales?: { Opcional: Opcional | Opcional[] };
+    Observaciones?: { Obs: WsError | WsError[] };
   };
   Errors?: { Err: WsError | WsError[] };
   Events?: { Evt: WsError | WsError[] };
@@ -601,9 +633,7 @@ export interface FacturaExpoResult {
 // API Simplificada - Tipos de entrada
 // ============================================================
 
-export interface LineItem {
-  /** Importe neto (sin IVA) */
-  neto: number;
+interface LineItemBase {
   /**
    * Tipo de alícuota IVA (usar enum IvaTipo).
    * Si no se especifica y exento=false, el item se trata como no gravado (ImpTotConc).
@@ -613,13 +643,47 @@ export interface LineItem {
   exento?: boolean;
 }
 
+/** Item con importe neto (sin IVA). El IVA se calcula sobre el neto. */
+export interface LineItemNeto extends LineItemBase {
+  /** Importe neto (sin IVA) */
+  neto: number;
+  total?: undefined;
+}
+
+/**
+ * Item con precio final (IVA incluido), típico de un punto de venta.
+ * El neto y el IVA se despejan del total. En exentos y no gravados, total = neto.
+ */
+export interface LineItemTotal extends LineItemBase {
+  /** Precio final con IVA incluido */
+  total: number;
+  neto?: undefined;
+}
+
+/** Un item lleva `neto` (sin IVA) o `total` (IVA incluido), nunca ambos. */
+export type LineItem = LineItemNeto | LineItemTotal;
+
 export interface FacturarOpts {
   /** Punto de venta */
   ptoVta: number;
   /** Tipo de comprobante (usar enum CbteTipo) */
   cbteTipo: number;
-  /** Items de la factura con importes netos */
+  /**
+   * Número de comprobante a emitir. Si se indica, no se consulta
+   * `ultimoComprobante` y reintentar con el mismo número es seguro (ARCA
+   * rechaza un número ya usado: nunca se duplica un comprobante).
+   *
+   * Sin `cbteNro`, el SDK usa último + 1 y no hay lock: el caller es
+   * responsable de serializar las emisiones por (ptoVta, cbteTipo).
+   */
+  cbteNro?: number;
+  /** Items de la factura: cada uno con `neto` (sin IVA) o `total` (IVA incluido) */
   items: LineItem[];
+  /**
+   * Descuento global, como monto final (IVA incluido). Se prorratea entre las
+   * alícuotas, exento y no gravado en proporción a su total. No afecta tributos.
+   */
+  descuentoGlobal?: number;
   /** Concepto. Default: PRODUCTOS. Se auto-detecta SERVICIOS si se provee `servicio` */
   concepto?: number;
   /** Tipo de documento del receptor (usar enum DocTipo). Default: CONSUMIDOR_FINAL */
@@ -642,10 +706,17 @@ export interface FacturarOpts {
   tributos?: Tributo[];
   /** Datos opcionales (ej: CBU para FCE) */
   opcionales?: Opcional[];
-  /** Condición de IVA del receptor (usar enum CondicionIva). Default: se infiere de docTipo si es posible. */
+  /**
+   * Condición de IVA del receptor (usar enum CondicionIva). Obligatoria si el
+   * receptor está identificado (docTipo distinto de 99): no se infiere del tipo
+   * de documento porque un CUIT puede ser RI, monotributista o exento. Para
+   * consumidor final sin identificar (docTipo 99) el default es CONSUMIDOR_FINAL (5).
+   */
   condicionIva?: number;
   /** Cancela en misma moneda extranjera: "S" o "N". Requerido si moneda != PES. */
   canMisMonExt?: string;
+  /** Comprobantes asociados (para NC/ND, o para asociar otros comprobantes). */
+  cbtesAsoc?: ComprobanteRef[];
 }
 
 export interface ComprobanteRef {
@@ -684,6 +755,8 @@ export interface Importes {
   exento: number;
   noGravado: number;
   tributos: number;
+  /** Descuento global aplicado (IVA incluido). No disponible en comprobantes recuperados. */
+  descuento?: number;
 }
 
 export interface FacturaResult {
@@ -703,6 +776,39 @@ export interface FacturaResult {
   importes: Importes;
   /** Observaciones de ARCA (pueden existir incluso si fue aprobada) */
   observaciones: { code: number; msg: string }[];
-  /** Resultado crudo de FECAESolicitar */
-  raw: FECAESolicitarResult;
+  /** Resultado crudo: FECAESolicitar, o FECompConsultar si se obtuvo con `recuperarComprobante` */
+  raw: FECAESolicitarResult | FECompConsultarResult;
+}
+
+/**
+ * Datos de un intento de emisión: alcanzan para saber, después, si ARCA lo
+ * autorizó (`recuperarComprobante`). Es JSON puro: se puede persistir antes de
+ * enviar el comprobante.
+ */
+export interface IntentoComprobante {
+  ptoVta: number;
+  cbteTipo: number;
+  cbteNro: number;
+  importeTotal: number;
+  docTipo: number;
+  docNro: number;
+  /** Fecha del comprobante (YYYYMMDD) */
+  fecha: string;
+}
+
+export type ResultadoRecuperacion =
+  /** ARCA autorizó el comprobante con los mismos datos del intento. */
+  | { estado: "autorizado"; resultado: FacturaResult }
+  /** ARCA no tiene ese número: reintentar con el mismo `cbteNro` es seguro. */
+  | { estado: "no_emitido" }
+  /** El número existe pero con otros datos (lo usó otra emisión). */
+  | { estado: "conflicto"; encontrado: FECompConsultarResult };
+
+export interface ComprobanteArmado {
+  /** Detalle listo para enviar a FECAESolicitar */
+  request: InvoiceDetail;
+  /** Importes calculados */
+  importes: Importes;
+  /** Datos para recuperar el comprobante si el resultado es incierto. Persistilo antes de enviar. */
+  intento: IntentoComprobante;
 }
