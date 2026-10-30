@@ -95,12 +95,23 @@ Cuando una factura se envía a ARCA pueden pasar tres cosas:
 | Resultado | Qué lanza / devuelve el SDK | ¿Se emitió? |
 | --- | --- | --- |
 | ARCA autorizó | `FacturaResult` con `aprobada: true` y `cae` | Sí |
-| ARCA rechazó | `ArcaWSFEError` (errores) o `aprobada: false` (observaciones) | No |
-| No se sabe (timeout, conexión cortada, HTTP 5xx, respuesta ilegible) | `ArcaResultadoIncierto` | **Hay que averiguarlo** |
+| ARCA rechazó | `ArcaWSFEError` (errores) o `aprobada: false` (observaciones) | No (ver 10016 abajo) |
+| No se sabe (timeout, conexión cortada, HTTP 5xx, respuesta ilegible, error interno 500/501/502 de ARCA) | `ArcaResultadoIncierto` | **Hay que averiguarlo** |
 
 Las emisiones (`FECAESolicitar`, `FECAEARegInformativo`, `FECAEASinMovimientoInformar`, `FEXAuthorize`)
 **nunca se reintentan**: si ARCA otorgó el CAE y la respuesta se perdió, un reintento automático
 chocaría con la numeración. `retries` aplica solo a consultas.
+
+`ArcaResultadoIncierto` y `recuperarComprobante` cubren `facturar`, `notaCredito`, `notaDebito`,
+`crearFactura`, `registrarFacturaCAEA` y `registrarCAEA`. En **exportación** (`facturarExpo`,
+`crearFacturaExportacion`) y en `sinMovimientoCAEA`, un resultado incierto llega como `ArcaSoapError`
+con `uncertain: true`: verificá con `consultarComprobanteExpo` (o consultando el CAEA) antes de
+volver a enviar.
+
+**Validación 10016** ("el número no se corresponde con el próximo a autorizar"): llega como
+`aprobada: false` con esa observación. Si el número lo reservaste vos y hubo un intento previo, suele
+significar que ese intento **sí se autorizó**: resolvelo con `recuperarComprobante` antes de marcar el
+comprobante como rechazado. `requiereRecuperacion(resultado)` lo detecta.
 
 Para resolver un resultado incierto, `recuperarComprobante(intento)` devuelve:
 
@@ -117,7 +128,7 @@ Sin `cbteNro`, el SDK usa el último autorizado + 1 y **no hay lock**: serializ�
 
 ```typescript
 import {
-  Arca, ArcaResultadoIncierto, ArcaWSFEError, CbteTipo, IvaTipo, FileTicketStorage,
+  Arca, ArcaResultadoIncierto, ArcaWSFEError, CbteTipo, IvaTipo, FileTicketStorage, requiereRecuperacion,
 } from "@ramiidv/arca-facturacion";
 
 const arca = new Arca({ cuit, cert, key, production: true, ticketStorage: new FileTicketStorage("./.arca") });
@@ -130,6 +141,8 @@ async function emitir(job: Job) {
     ptoVta: job.ptoVta,
     cbteTipo: CbteTipo.FACTURA_B,
     cbteNro,
+    // Fijar la fecha: si no, el intento guardado y el envío podrían caer en días distintos.
+    fecha: Arca.formatDate(arca.wsaa.now()),
     items: job.items.map((i) => ({ total: i.precio, iva: IvaTipo.IVA_21 })), // precios con IVA
     descuentoGlobal: job.descuento,
   };
@@ -138,11 +151,12 @@ async function emitir(job: Job) {
 
   try {
     const res = await arca.facturar(opts);
-    if (!res.aprobada) return db.jobs.update(job.id, { estado: "rechazado", obs: res.observaciones });
-    return db.jobs.update(job.id, { estado: "autorizado", cae: res.cae, vto: res.caeVencimiento });
+    if (res.aprobada) return db.jobs.update(job.id, { estado: "autorizado", cae: res.cae, vto: res.caeVencimiento });
+    if (requiereRecuperacion(res)) return db.jobs.update(job.id, { estado: "incierto" }); // 10016
+    return db.jobs.update(job.id, { estado: "rechazado", obs: res.observaciones });
   } catch (e) {
-    if (e instanceof ArcaWSFEError) return db.jobs.update(job.id, { estado: "rechazado", errores: e.errors });
     if (e instanceof ArcaResultadoIncierto) return db.jobs.update(job.id, { estado: "incierto" });
+    if (e instanceof ArcaWSFEError) return db.jobs.update(job.id, { estado: "rechazado", errores: e.errors });
     throw e; // validación, auth, sin conexión (no se envió): reintentar el job más tarde
   }
 }
@@ -521,9 +535,7 @@ try {
   } else if (e instanceof ArcaWSFEError) {
     // ARCA rechazó el comprobante (no se emitió)
     for (const err of e.errors) console.error(`[${err.code}] ${err.msg}`);
-    if (e.tieneCodigo(10016)) {
-      // "número no corresponde con el próximo": quizá un intento anterior sí se autorizó
-    }
+    // Para 10016 en un rechazo con observaciones, ver requiereRecuperacion(resultado).
   } else if (e instanceof ArcaValidationError) {
     console.error(e.field, e.details); // datos inválidos, no se envió nada
   } else if (e instanceof ArcaTicketVigenteError) {
@@ -540,7 +552,7 @@ try {
 | Clase | `code` | Cuándo se lanza |
 | --- | --- | --- |
 | `ArcaResultadoIncierto` | `ARCA_RESULTADO_INCIERTO` | Emisión sin respuesta confiable. Contiene `intento`, `intentos`, `operacion` |
-| `ArcaWSFEError` | `ARCA_WSFE_ERROR` | Error devuelto por WSFE/WSFEX (no se emitió). Contiene `errors: { code, msg }[]` y `tieneCodigo(code)` |
+| `ArcaWSFEError` | `ARCA_WSFE_ERROR` | Error devuelto por WSFE/WSFEX (no se emitió; los errores internos 500/501/502 llegan como `ArcaResultadoIncierto`). Contiene `errors: { code, msg }[]` y `tieneCodigo(code)` |
 | `ArcaValidationError` | `ARCA_VALIDATION_ERROR` | Datos de entrada inválidos. Contiene `field` y `details` |
 | `ArcaTicketVigenteError` | `ARCA_TICKET_VIGENTE` | WSAA ya emitió un TA vigente que no está en memoria ni en el storage |
 | `ArcaAuthError` | `ARCA_AUTH_ERROR` | Falla en login WSAA, respuesta inesperada, token/sign inválidos |
@@ -716,7 +728,7 @@ También se exportan como funciones: `armarComprobante`, `calcularTotales`, `res
 
 | Método | Descripción |
 | --- | --- |
-| `clearAuthCache()` | Invalida los tickets de acceso (memoria y `ticketStorage`). Devuelve `Promise<void>` |
+| `clearAuthCache()` | Invalida los tickets de acceso (memoria y `ticketStorage`). Devuelve `Promise<void>`. **Ojo:** WSAA no emite un ticket nuevo mientras el anterior siga vigente, así que borrar uno vigente deja sin acceso hasta que venza (`ArcaTicketVigenteError`). Usalo solo si el ticket es inválido (ej: cambiaste de certificado) |
 | `wsaa` | Cliente WSAA de la instancia, para compartirlo con otros SDKs |
 
 ## Tipos de comprobante soportados
