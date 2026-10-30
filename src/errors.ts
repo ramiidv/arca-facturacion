@@ -12,13 +12,16 @@ import type { IntentoComprobante } from "./types.js";
 /**
  * Error de WSFE/WSFEX con códigos de error de ARCA.
  *
- * En una emisión, este error significa que ARCA **rechazó** el comprobante:
- * no se emitió. Ojo con el código 10016 ("el número o fecha del comprobante no
- * se corresponde con el próximo a autorizar"): suele indicar que un intento
- * anterior con ese número sí se autorizó. En ese caso usar `recuperarComprobante`.
+ * En una emisión, este error significa que ARCA **rechazó** el request: no se
+ * emitió. Los errores internos de ARCA (500, 501, 502) no llegan como este
+ * error sino como `ArcaResultadoIncierto`, porque no garantizan nada.
+ *
+ * Los rechazos de un comprobante puntual (como 10016, "el número no se
+ * corresponde con el próximo a autorizar") llegan como `aprobada: false` con
+ * observaciones, no como este error: ver `requiereRecuperacion`.
  */
 export class ArcaWSFEError extends ArcaError {
-  public override readonly code: string = "ARCA_WSFE_ERROR";
+  static override readonly code: string = "ARCA_WSFE_ERROR";
   public readonly errors: { code: number; msg: string }[];
 
   constructor(errors: { code: number; msg: string }[]) {
@@ -49,7 +52,7 @@ export type OperacionEmision = "FECAESolicitar" | "FECAEARegInformativo";
  * Si ARCA respondió con errores de negocio, el error es `ArcaWSFEError` (no se emitió).
  */
 export class ArcaResultadoIncierto extends ArcaError {
-  public override readonly code: string = "ARCA_RESULTADO_INCIERTO";
+  static override readonly code: string = "ARCA_RESULTADO_INCIERTO";
   /** Operación SOAP que quedó incierta */
   public readonly operacion: OperacionEmision;
   /** Datos del (primer) comprobante enviado, para `recuperarComprobante`. */
@@ -62,6 +65,9 @@ export class ArcaResultadoIncierto extends ArcaError {
     intentos: IntentoComprobante[],
     options?: { cause?: unknown }
   ) {
+    if (intentos.length === 0) {
+      throw new TypeError("ArcaResultadoIncierto requiere al menos un intento");
+    }
     const i = intentos[0];
     const causa = options?.cause instanceof Error ? `: ${options.cause.message}` : "";
     super(
