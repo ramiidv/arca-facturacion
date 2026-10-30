@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ArcaResultadoIncierto, ArcaWSFEError } from "../src/errors.js";
 import { ArcaSoapError, ArcaValidationError } from "@ramiidv/arca-common";
 import { CbteTipo, CondicionIva, DocTipo, IvaTipo } from "../src/constants.js";
+import { requiereRecuperacion } from "../src/facturacion.js";
 import {
   arcaDePrueba,
   caeAprobado,
@@ -101,13 +102,53 @@ describe("emisiones: nunca se reintentan", () => {
   it("Errors de ARCA → ArcaWSFEError (no se emitió)", async () => {
     const arca = await arcaDePrueba();
     mockArcaFetch({
-      FECAESolicitar: wsfeErrores("FECAESolicitar", [
-        { code: 10016, msg: "El numero o fecha del comprobante no se corresponde con el proximo a autorizar." },
-      ]),
+      FECAESolicitar: wsfeErrores("FECAESolicitar", [{ code: 600, msg: "ValidacionDeToken: No aparecio CUIT en lista de relaciones" }]),
     });
     const err = await arca.facturar({ ...B, cbteNro: 151 }).catch((e) => e);
     expect(err).toBeInstanceOf(ArcaWSFEError);
-    expect(err.tieneCodigo(10016)).toBe(true);
+    expect(err.tieneCodigo(600)).toBe(true);
+    expect(requiereRecuperacion(err)).toBe(false);
+  });
+
+  it("error interno de ARCA (501) → incierto, no rechazo", async () => {
+    const arca = await arcaDePrueba();
+    mockArcaFetch({ FECAESolicitar: wsfeErrores("FECAESolicitar", [{ code: 501, msg: "Error interno de base de datos" }]) });
+    const err = await arca.facturar({ ...B, cbteNro: 151 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ArcaResultadoIncierto);
+    expect(err.cause).toBeInstanceOf(ArcaWSFEError);
+  });
+
+  it("10016 llega como observación con Resultado R → requiereRecuperacion", async () => {
+    const arca = await arcaDePrueba();
+    mockArcaFetch({
+      FECAESolicitar: wsfeResponse(
+        "FECAESolicitar",
+        "<FeCabResp><Cuit>20123456786</Cuit><PtoVta>1</PtoVta><CbteTipo>6</CbteTipo><FchProceso>20261030120000</FchProceso>" +
+          "<CantReg>1</CantReg><Resultado>R</Resultado><Reproceso>N</Reproceso></FeCabResp>" +
+          "<FeDetResp><FECAEDetResponse><Concepto>1</Concepto><DocTipo>99</DocTipo><DocNro>0</DocNro>" +
+          "<CbteDesde>151</CbteDesde><CbteHasta>151</CbteHasta><CbteFch>20261030</CbteFch><Resultado>R</Resultado>" +
+          "<Observaciones><Obs><Code>10016</Code><Msg>El numero o fecha del comprobante no se corresponde con el proximo a autorizar.</Msg></Obs></Observaciones>" +
+          "</FECAEDetResponse></FeDetResp>"
+      ),
+    });
+    const res = await arca.facturar({ ...B, cbteNro: 151 });
+    expect(res.aprobada).toBe(false);
+    expect(res.cae).toBeUndefined();
+    expect(requiereRecuperacion(res)).toBe(true);
+  });
+
+  it("un listener que lanza no convierte un CAE otorgado en error", async () => {
+    const arca = await arcaDePrueba({
+      onEvent: () => {
+        throw new Error("logger roto");
+      },
+    });
+    arca.on("request:end", () => {
+      throw new Error("otro listener roto");
+    });
+    mockArcaFetch({ FECAESolicitar: caeAprobado({ ptoVta: 1, cbteTipo: 6, cbteNro: 151 }) });
+    const res = await arca.facturar({ ...B, cbteNro: 151 });
+    expect(res.cae).toBe("76123456789012");
   });
 
   it("las consultas sí se reintentan", async () => {
@@ -176,5 +217,32 @@ describe("notas de crédito", () => {
     const body = mock.calls[0].body;
     expect(body).toMatch(/<CbteAsoc>\s*<Tipo>1<\/Tipo>\s*<PtoVta>1<\/PtoVta>\s*<Nro>10<\/Nro>\s*<CbteFch>20261029<\/CbteFch>/);
     expect(mock.count("FECompUltimoAutorizado")).toBe(0);
+  });
+});
+
+describe("CAEA", () => {
+  it("registrarFacturaCAEA devuelve el CAEA como código (no el texto \"undefined\")", async () => {
+    const arca = await arcaDePrueba();
+    mockArcaFetch({
+      FECAEARegInformativo: wsfeResponse(
+        "FECAEARegInformativo",
+        "<FeCabResp><Cuit>20123456786</Cuit><PtoVta>5</PtoVta><CbteTipo>6</CbteTipo><FchProceso>20261030120000</FchProceso>" +
+          "<CantReg>1</CantReg><Resultado>A</Resultado><Reproceso>N</Reproceso></FeCabResp>" +
+          "<FeDetResp><FECAEADetResponse><Concepto>1</Concepto><DocTipo>99</DocTipo><DocNro>0</DocNro>" +
+          "<CbteDesde>10</CbteDesde><CbteHasta>10</CbteHasta><CbteFch>20261030</CbteFch><Resultado>A</Resultado>" +
+          "<CAEA>36123456789012</CAEA></FECAEADetResponse></FeDetResp>"
+      ),
+    });
+    const res = await arca.registrarFacturaCAEA("36123456789012", { ...B, ptoVta: 5, cbteNro: 10 });
+    expect(res.aprobada).toBe(true);
+    expect(res.cae).toBe("36123456789012");
+    expect(res.caeVencimiento).toBeUndefined();
+  });
+
+  it("registrarCAEA raw valida el request", async () => {
+    const arca = await arcaDePrueba();
+    const mock = mockArcaFetch({});
+    await expect(arca.registrarCAEA({ PtoVta: 5, CbteTipo: 6, invoices: [] })).rejects.toBeInstanceOf(ArcaValidationError);
+    expect(mock.fn).not.toHaveBeenCalled();
   });
 });

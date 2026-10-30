@@ -1,20 +1,21 @@
 import { EventEmitter } from "node:events";
-import { anySignal } from "@ramiidv/arca-common";
+import { anySignal, safeEmit } from "@ramiidv/arca-common";
 import type { CallOptions } from "@ramiidv/arca-common";
 import { WsaaClient } from "./wsaa.js";
 import { WsfeClient } from "./wsfe.js";
 import { WsfexClient } from "./wsfex.js";
-import { PadronClient, PADRON_A5_SERVICE, PADRON_A13_SERVICE } from "./padron.js";
+import { PadronClient } from "./padron.js";
 import {
   armarComprobante,
+  buildInvoiceDetail,
   coincideConIntento,
   facturaResultDesdeConsulta,
   parseFacturaResult,
   toDateString,
   calcularTotales,
 } from "./facturacion.js";
-import { ArcaError } from "./errors.js";
 import {
+  fail,
   validateFacturarOpts,
   validateFacturarExpoOpts,
   validateInvoiceRequest,
@@ -55,7 +56,11 @@ import type {
   IntentoComprobante,
   ResultadoRecuperacion,
 } from "./types.js";
-import { NOTA_CREDITO_MAP, NOTA_DEBITO_MAP, QR_URL } from "./constants.js";
+import { toArray } from "./soap-client.js";
+import { NOTA_CREDITO_MAP, NOTA_DEBITO_MAP, QR_URL, TipoExpo, WSAA_SERVICES, isTipoC } from "./constants.js";
+
+/** TTL por defecto del cache de parámetros (24 horas). */
+const DEFAULT_PARAM_CACHE_TTL_MS = 24 * 60 * 60_000;
 
 export class Arca {
   /**
@@ -80,15 +85,17 @@ export class Arca {
     this.production = config.production ?? false;
     this.onEventCb = config.onEvent;
     this.signal = config.signal;
-    this.paramCacheTTLMs = config.paramCacheTTLMs ?? 24 * 60 * 60_000; // default 24h
+    this.paramCacheTTLMs = config.paramCacheTTLMs ?? DEFAULT_PARAM_CACHE_TTL_MS;
 
-    const timeoutMs = config.requestTimeoutMs ?? 30_000;
-    const retries = config.retries ?? 1;
-    const retryDelayMs = config.retryDelayMs ?? 1_000;
+    // Los defaults (timeout 30s, 1 reintento, 1s de backoff, TTL 12h) los aplica arca-common.
+    const timeoutMs = config.requestTimeoutMs;
+    const retries = config.retries;
+    const retryDelayMs = config.retryDelayMs;
 
+    // Un listener que lanza nunca debe convertir una respuesta de ARCA en error.
     const emit = (event: ArcaEvent) => {
-      this.onEventCb?.(event);
-      this.emitter.emit(event.type, event);
+      safeEmit(this.onEventCb, event);
+      safeEmit((e) => this.emitter.emit(e.type, e), event);
     };
 
     const clientOpts = { timeoutMs, retries, retryDelayMs, onEvent: emit };
@@ -99,7 +106,7 @@ export class Arca {
         cert: config.cert,
         key: config.key,
         production: this.production,
-        tokenTTLMinutes: config.tokenTTLMinutes ?? 720,
+        tokenTTLMinutes: config.tokenTTLMinutes,
         timeout: timeoutMs,
         retries,
         retryDelayMs,
@@ -148,7 +155,7 @@ export class Arca {
     return { signal: anySignal(this.signal, call?.signal) };
   }
 
-  private async getAuth(service: string = "wsfe", call?: CallOptions): Promise<WsfeAuth> {
+  private async getAuth(service: string, call?: CallOptions): Promise<WsfeAuth> {
     const ticket = await this.wsaa.getAccessTicket(service, call);
     return {
       Token: ticket.token,
@@ -170,14 +177,14 @@ export class Arca {
   async crearFactura(request: InvoiceRequest, call?: CallOptions): Promise<FECAESolicitarResult> {
     validateInvoiceRequest(request);
     const opts = this.opts(call);
-    const auth = await this.getAuth("wsfe", opts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, opts);
     return this.wsfe.solicitarCAE(auth, request, opts);
   }
 
   /** Último número de comprobante autorizado. */
   async ultimoComprobante(ptoVta: number, cbteTipo: number, call?: CallOptions): Promise<number> {
     const opts = this.opts(call);
-    const auth = await this.getAuth("wsfe", opts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, opts);
     return this.wsfe.ultimoComprobante(auth, ptoVta, cbteTipo, opts);
   }
 
@@ -238,10 +245,12 @@ export class Arca {
    * Crea una nota de crédito. Tipo de NC inferido del comprobante original.
    */
   async notaCredito(opts: NotaCreditoOpts, call?: CallOptions): Promise<FacturaResult> {
-    const cbteTipo = NOTA_CREDITO_MAP[opts.comprobanteOriginal.tipo];
+    const cbteTipo = NOTA_CREDITO_MAP[opts.comprobanteOriginal?.tipo];
     if (cbteTipo === undefined) {
-      throw new ArcaError(
-        `No se puede inferir el tipo de Nota de Crédito para CbteTipo ${opts.comprobanteOriginal.tipo}`
+      fail(
+        "comprobanteOriginal.tipo",
+        `No se puede inferir el tipo de Nota de Crédito para CbteTipo ${opts.comprobanteOriginal?.tipo}`,
+        opts.comprobanteOriginal?.tipo
       );
     }
     return this.emitirComprobante(this.conAsociado(cbteTipo, opts), call);
@@ -251,10 +260,12 @@ export class Arca {
    * Crea una nota de débito. Tipo de ND inferido del comprobante original.
    */
   async notaDebito(opts: NotaDebitoOpts, call?: CallOptions): Promise<FacturaResult> {
-    const cbteTipo = NOTA_DEBITO_MAP[opts.comprobanteOriginal.tipo];
+    const cbteTipo = NOTA_DEBITO_MAP[opts.comprobanteOriginal?.tipo];
     if (cbteTipo === undefined) {
-      throw new ArcaError(
-        `No se puede inferir el tipo de Nota de Débito para CbteTipo ${opts.comprobanteOriginal.tipo}`
+      fail(
+        "comprobanteOriginal.tipo",
+        `No se puede inferir el tipo de Nota de Débito para CbteTipo ${opts.comprobanteOriginal?.tipo}`,
+        opts.comprobanteOriginal?.tipo
       );
     }
     return this.emitirComprobante(this.conAsociado(cbteTipo, opts), call);
@@ -270,15 +281,24 @@ export class Arca {
   }
 
   private async emitirComprobante(opts: FacturarOpts, call?: CallOptions): Promise<FacturaResult> {
-    // Validar antes de tocar la red.
-    validateFacturarOpts(opts);
-    const cbteNro = opts.cbteNro ?? (await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo, call));
-    const { request, importes } = this.armarComprobante({ ...opts, cbteNro });
+    const { detail, importes } = await this.prepararComprobante(opts, call);
     const result = await this.crearFactura(
-      { PtoVta: opts.ptoVta, CbteTipo: opts.cbteTipo, invoices: [request] },
+      { PtoVta: opts.ptoVta, CbteTipo: opts.cbteTipo, invoices: [detail] },
       call
     );
     return parseFacturaResult(result, importes);
+  }
+
+  /**
+   * Valida (antes de tocar la red), resuelve el número y arma el detalle.
+   * Los importes se calculan antes de consultar el último comprobante, así un
+   * descuento inválido no gasta una consulta.
+   */
+  private async prepararComprobante(opts: FacturarOpts, call?: CallOptions) {
+    validateFacturarOpts(opts);
+    calcularTotales(opts.items, { descuentoGlobal: opts.descuentoGlobal, tipoC: isTipoC(opts.cbteTipo) });
+    const cbteNro = opts.cbteNro ?? (await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo, call));
+    return buildInvoiceDetail(opts, cbteNro, this.wsaa.now());
   }
 
   /**
@@ -321,7 +341,7 @@ export class Arca {
     call?: CallOptions
   ): Promise<FECompConsultarResult> {
     const opts = this.opts(call);
-    const auth = await this.getAuth("wsfe", opts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, opts);
     return this.wsfe.consultarComprobante(auth, cbteTipo, ptoVta, cbteNro, opts);
   }
 
@@ -332,7 +352,7 @@ export class Arca {
   /** Autoriza un comprobante de exportación (WSFEX). */
   async crearFacturaExportacion(invoice: WsfexInvoice, call?: CallOptions): Promise<WsfexAuthResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.authorize(auth, invoice, callOpts);
   }
 
@@ -343,7 +363,7 @@ export class Arca {
     call?: CallOptions
   ): Promise<number> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getLastCmp(auth, ptoVta, cbteTipo, callOpts);
   }
 
@@ -359,7 +379,7 @@ export class Arca {
   /** Último ID de request WSFEX. */
   async ultimoIdExpo(call?: CallOptions): Promise<number> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getLastId(auth, callOpts);
   }
 
@@ -371,7 +391,7 @@ export class Arca {
     call?: CallOptions
   ): Promise<WsfexGetCmpResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getCmp(auth, cbteTipo, ptoVta, cbteNro, callOpts);
   }
 
@@ -383,56 +403,56 @@ export class Arca {
   /** Tipos de comprobante de exportación. */
   async getTiposCbteExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getTiposCbte(auth, callOpts);
   }
 
   /** Monedas (WSFEX). */
   async getMonedasExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getMonedas(auth, callOpts);
   }
 
   /** Países destino de exportación. */
   async getPaisesExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getPaises(auth, callOpts);
   }
 
   /** Idiomas disponibles (WSFEX). */
   async getIdiomasExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getIdiomas(auth, callOpts);
   }
 
   /** Incoterms disponibles. */
   async getIncotermsExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getIncoterms(auth, callOpts);
   }
 
   /** Unidades de medida (WSFEX). */
   async getUMedExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getUMed(auth, callOpts);
   }
 
   /** Tipos de exportación. */
   async getTiposExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getTiposExpo(auth, callOpts);
   }
 
   /** CUITs de países. */
   async getCuitsPaisExpo(call?: CallOptions): Promise<WsfexParamItem[]> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     return this.wsfex.getCuitsPais(auth, callOpts);
   }
 
@@ -443,7 +463,7 @@ export class Arca {
   async facturarExpo(opts: FacturarExpoOpts, call?: CallOptions): Promise<FacturaExpoResult> {
     validateFacturarExpoOpts(opts);
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfex", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfex, callOpts);
     const [lastId, nextNum] = await Promise.all([
       this.wsfex.getLastId(auth, callOpts),
       this.wsfex.getLastCmp(auth, opts.ptoVta, opts.cbteTipo, callOpts).then((n) => n + 1),
@@ -469,7 +489,7 @@ export class Arca {
     ) / 100;
 
     // Permiso_existente: "S"/"N" solo para Bienes (1). Servicios (2) y Otros (4) requieren "".
-    const esServicios = [2, 4].includes(opts.tipoExpo);
+    const esServicios = opts.tipoExpo === TipoExpo.SERVICIOS || opts.tipoExpo === TipoExpo.OTROS;
     const permisoExistente = esServicios
       ? ""
       : (opts.permisoExistente ?? "N");
@@ -543,7 +563,7 @@ export class Arca {
     call?: CallOptions
   ): Promise<CaeaSolicitarResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.solicitarCAEA(auth, periodo, orden, callOpts);
   }
 
@@ -554,14 +574,18 @@ export class Arca {
     call?: CallOptions
   ): Promise<CaeaSolicitarResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.consultarCAEA(auth, periodo, orden, callOpts);
   }
 
   /** Informa comprobantes emitidos con un CAEA. */
   async registrarCAEA(request: CaeaRegInfRequest, call?: CallOptions): Promise<CaeaRegInfResult> {
+    validateInvoiceRequest(request);
+    request.invoices.forEach((inv, i) => {
+      if (!inv.CAEA) fail(`invoices[${i}].CAEA`, "CAEA es requerido");
+    });
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.registrarCAEA(auth, request, callOpts);
   }
 
@@ -586,15 +610,13 @@ export class Arca {
     opts: FacturarOpts,
     call?: CallOptions
   ): Promise<FacturaResult> {
-    if (!caea) throw new ArcaError("Validación: caea es requerido");
-    validateFacturarOpts(opts);
-    const cbteNro = opts.cbteNro ?? (await this.siguienteComprobante(opts.ptoVta, opts.cbteTipo, call));
-    const { request, importes } = this.armarComprobante({ ...opts, cbteNro });
+    if (!caea) fail("caea", "caea es requerido");
+    const { detail, importes } = await this.prepararComprobante(opts, call);
 
     const result = await this.registrarCAEA({
       PtoVta: opts.ptoVta,
       CbteTipo: opts.cbteTipo,
-      invoices: [{ ...request, CAEA: caea }],
+      invoices: [{ ...detail, CAEA: caea }],
     }, call);
 
     // CaeaRegInfResult usa FECAEADetResponse, adaptar para parseFacturaResult
@@ -614,7 +636,7 @@ export class Arca {
     call?: CallOptions
   ): Promise<CaeaSinMovResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.sinMovimientoCAEA(auth, caea, ptoVta, callOpts);
   }
 
@@ -630,7 +652,7 @@ export class Arca {
    */
   async consultarCuit(cuit: number, call?: CallOptions): Promise<Contribuyente> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth(PADRON_A13_SERVICE, callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.padronA13, callOpts);
     return this.padron.getPersonaA13(auth, cuit, callOpts);
   }
 
@@ -644,7 +666,7 @@ export class Arca {
    */
   async consultarCuitDetalle(cuit: number, call?: CallOptions): Promise<Contribuyente> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth(PADRON_A5_SERVICE, callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.padronA5, callOpts);
     return this.padron.getPersonaA5(auth, cuit, callOpts);
   }
 
@@ -673,7 +695,7 @@ export class Arca {
   async getTiposComprobante(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposCbte", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposComprobante(auth, callOpts);
     });
   }
@@ -682,7 +704,7 @@ export class Arca {
   async getTiposConcepto(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposConcepto", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposConcepto(auth, callOpts);
     });
   }
@@ -691,7 +713,7 @@ export class Arca {
   async getTiposDocumento(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposDoc", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposDocumento(auth, callOpts);
     });
   }
@@ -700,7 +722,7 @@ export class Arca {
   async getCondicionesIva(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("condicionesIva", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getCondicionesIva(auth, callOpts);
     });
   }
@@ -709,7 +731,7 @@ export class Arca {
   async getTiposIva(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposIva", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposIva(auth, callOpts);
     });
   }
@@ -718,7 +740,7 @@ export class Arca {
   async getMonedas(call?: CallOptions): Promise<MonedaItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("monedas", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getMonedas(auth, callOpts);
     });
   }
@@ -727,7 +749,7 @@ export class Arca {
   async getTiposTributo(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposTrib", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposTributo(auth, callOpts);
     });
   }
@@ -736,7 +758,7 @@ export class Arca {
   async getTiposOpcional(call?: CallOptions): Promise<ParamItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("tiposOpc", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getTiposOpcional(auth, callOpts);
     });
   }
@@ -745,7 +767,7 @@ export class Arca {
   async getPuntosVenta(call?: CallOptions): Promise<PtoVentaItem[]> {
     const callOpts = this.opts(call);
     return this.cachedParam("ptosVenta", async () => {
-      const auth = await this.getAuth("wsfe", callOpts);
+      const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
       return this.wsfe.getPuntosVenta(auth, callOpts);
     });
   }
@@ -753,14 +775,14 @@ export class Arca {
   /** Cotización de una moneda. No cacheado (cambia frecuentemente). */
   async getCotizacion(monedaId: string, call?: CallOptions): Promise<CotizacionResult> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.getCotizacion(auth, monedaId, callOpts);
   }
 
   /** Cantidad máxima de registros por request de FECAESolicitar. */
   async getCantMaxRegistros(call?: CallOptions): Promise<number> {
     const callOpts = this.opts(call);
-    const auth = await this.getAuth("wsfe", callOpts);
+    const auth = await this.getAuth(WSAA_SERVICES.wsfe, callOpts);
     return this.wsfe.getCantMaxRegistros(auth, callOpts);
   }
 
@@ -815,9 +837,7 @@ export class Arca {
     cae?: string;
     caeFchVto?: string;
   } {
-    const detArr = Array.isArray(result.FeDetResp.FECAEDetResponse)
-      ? result.FeDetResp.FECAEDetResponse
-      : [result.FeDetResp.FECAEDetResponse];
+    const detArr = toArray(result.FeDetResp.FECAEDetResponse);
     const approved = result.FeCabResp.Resultado === "A";
     const firstApproved = detArr.find((d) => d.Resultado === "A");
     return {
@@ -827,6 +847,7 @@ export class Arca {
       caeFchVto: firstApproved?.CAEFchVto,
     };
   }
+
 
   /** Formatea Date a YYYYMMDD (timezone Argentina). */
   static formatDate(date: Date | string): string {
@@ -844,7 +865,7 @@ export class Arca {
   /** Invalida los tickets de acceso (en memoria y en el `ticketStorage`). */
   async clearAuthCache(): Promise<void> {
     await Promise.all(
-      ["wsfe", "wsfex", PADRON_A5_SERVICE, PADRON_A13_SERVICE].map((s) => this.wsaa.clearTicket(s))
+      Object.values(WSAA_SERVICES).map((service) => this.wsaa.clearTicket(service))
     );
   }
 

@@ -1,5 +1,6 @@
-import { ArcaValidationError, CondicionIva } from "@ramiidv/arca-common";
+import { CondicionIva } from "@ramiidv/arca-common";
 import { CbteTipo } from "./constants.js";
+import { fail } from "./validation.js";
 
 export type ClaseComprobante = "factura" | "nota_credito" | "nota_debito";
 
@@ -47,10 +48,6 @@ const POR_CLASE: Record<"A" | "B" | "C", Record<ClaseComprobante, CbteTipo>> = {
   C: { factura: CbteTipo.FACTURA_C, nota_credito: CbteTipo.NOTA_CREDITO_C, nota_debito: CbteTipo.NOTA_DEBITO_C },
 };
 
-function invalido(field: string, message: string, value: unknown): never {
-  throw new ArcaValidationError(`Validación: ${message}`, [{ field, message, value }], field);
-}
-
 /**
  * Determina el tipo de comprobante (A, B o C) según la condición frente al IVA
  * del emisor y del receptor, para WSFEv1 (mercado interno).
@@ -72,12 +69,12 @@ export function resolverCbteTipo(
   receptor: CondicionIva,
   clase: ClaseComprobante = "factura"
 ): CbteTipo {
-  if (!(clase in POR_CLASE.A)) invalido("clase", `clase de comprobante desconocida: ${clase}`, clase);
+  if (!(clase in POR_CLASE.A)) fail("clase", `clase de comprobante desconocida: ${clase}`, clase);
 
   if (EMISORES_CLASE_C.has(emisor)) return POR_CLASE.C[clase];
 
   if (emisor !== CondicionIva.RESPONSABLE_INSCRIPTO) {
-    invalido(
+    fail(
       "emisor",
       `la condición frente al IVA ${emisor} no puede emitir comprobantes A, B ni C ` +
         "(solo Responsable Inscripto, Monotributista o Exento)",
@@ -87,5 +84,5 @@ export function resolverCbteTipo(
 
   if (RECEPTORES_CLASE_A.has(receptor)) return POR_CLASE.A[clase];
   if (RECEPTORES_CLASE_B.has(receptor)) return POR_CLASE.B[clase];
-  return invalido("receptor", `condición frente al IVA del receptor desconocida: ${receptor}`, receptor);
+  return fail("receptor", `condición frente al IVA del receptor desconocida: ${receptor}`, receptor);
 }

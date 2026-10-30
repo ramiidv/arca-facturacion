@@ -1,5 +1,5 @@
 import { ArcaValidationError } from "@ramiidv/arca-common";
-import { DocTipo, IVA_RATES, isTipoC } from "./constants.js";
+import { DocTipo, IVA_RATES } from "./constants.js";
 import type {
   FacturarOpts,
   FacturarExpoOpts,
@@ -8,7 +8,8 @@ import type {
   ExpoLineItem,
 } from "./types.js";
 
-function fail(field: string, msg: string, value?: unknown): never {
+/** Lanza un ArcaValidationError con el formato común del SDK. */
+export function fail(field: string, msg: string, value?: unknown): never {
   throw new ArcaValidationError(`Validación: ${msg}`, [{ field, message: msg, value }], field);
 }
 
@@ -26,18 +27,7 @@ export function validateFacturarOpts(opts: FacturarOpts): void {
   if (!opts.items || opts.items.length === 0)
     fail("items", "items no puede estar vacío");
 
-  const tipoC = isTipoC(opts.cbteTipo);
-  let totalItems = 0;
-  for (let i = 0; i < opts.items.length; i++) {
-    totalItems += validateLineItem(opts.items[i], i, tipoC);
-  }
-
-  if (opts.descuentoGlobal !== undefined) {
-    if (!isAmount(opts.descuentoGlobal) || opts.descuentoGlobal < 0)
-      fail("descuentoGlobal", "descuentoGlobal debe ser un número >= 0", opts.descuentoGlobal);
-    if (opts.descuentoGlobal > totalItems + 0.005)
-      fail("descuentoGlobal", "descuentoGlobal no puede superar el total de los items", opts.descuentoGlobal);
-  }
+  validateItems(opts.items, opts.descuentoGlobal);
 
   if (opts.fecha !== undefined) validateFecha("fecha", opts.fecha);
 
@@ -77,8 +67,17 @@ export function validateFacturarOpts(opts: FacturarOpts): void {
   }
 }
 
-/** Valida un item y devuelve su importe final aproximado (para validar el descuento). */
-function validateLineItem(item: LineItem, index: number, tipoC: boolean): number {
+/**
+ * Valida la forma de los items y del descuento global. Que el descuento no
+ * supere el total se valida al calcular los importes (al centavo).
+ */
+export function validateItems(items: LineItem[], descuentoGlobal?: number): void {
+  items.forEach(validateLineItem);
+  if (descuentoGlobal !== undefined && (!isAmount(descuentoGlobal) || descuentoGlobal < 0))
+    fail("descuentoGlobal", "descuentoGlobal debe ser un número >= 0", descuentoGlobal);
+}
+
+function validateLineItem(item: LineItem, index: number): void {
   const field = `items[${index}]`;
   const hasNeto = item.neto !== undefined;
   const hasTotal = item.total !== undefined;
@@ -99,9 +98,6 @@ function validateLineItem(item: LineItem, index: number, tipoC: boolean): number
 
   if (item.iva !== undefined && IVA_RATES[item.iva as keyof typeof IVA_RATES] === undefined)
     fail(`${field}.iva`, `Tipo de IVA desconocido: ${item.iva}`, item.iva);
-
-  if (hasTotal || tipoC || item.iva === undefined) return amount;
-  return amount * (1 + IVA_RATES[item.iva as keyof typeof IVA_RATES] / 100);
 }
 
 function validateFecha(field: string, fecha: Date | string): void {

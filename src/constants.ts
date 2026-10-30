@@ -21,6 +21,36 @@ export const ENDPOINTS = {
   },
 } as const;
 
+/** Tipos de exportación (WSFEX). */
+export enum TipoExpo {
+  BIENES = 1,
+  SERVICIOS = 2,
+  OTROS = 4,
+}
+
+/**
+ * Códigos de error internos de WSFEv1 (manual, "Errores generales"): 500 error
+ * interno de aplicación, 501 de base de datos, 502 transacción activa. No
+ * garantizan que el comprobante no se haya procesado.
+ */
+export const WSFE_ERRORES_INTERNOS: readonly number[] = [500, 501, 502];
+
+/**
+ * Validación 10016 de WSFEv1: el número de comprobante no es el próximo a
+ * autorizar. Después de un resultado incierto suele indicar que el intento
+ * original sí se autorizó.
+ */
+export const WSFE_NUMERO_NO_CORRESPONDE = 10016;
+
+/** Servicios WSAA que usa este SDK. */
+export const WSAA_SERVICES = {
+  wsfe: "wsfe",
+  wsfex: "wsfex",
+  /** Constancia de inscripción (ex Padrón A5, `ws_sr_padron_a5` está deprecado). */
+  padronA5: "ws_sr_constancia_inscripcion",
+  padronA13: "ws_sr_padron_a13",
+} as const;
+
 export const WSFE_NAMESPACE = "http://ar.gov.afip.dif.FEV1/";
 export const WSFEX_NAMESPACE = "http://ar.gov.afip.dif.fexv1/";
 export const PADRON_A5_NAMESPACE = "http://a5.soap.ws.server.puc.sr/";

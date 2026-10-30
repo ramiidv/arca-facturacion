@@ -7,6 +7,7 @@ export {
   intentoDesdeComprobante,
   coincideConIntento,
   facturaResultDesdeConsulta,
+  requiereRecuperacion,
   toDateString,
 } from "./facturacion.js";
 export { resolverCbteTipo } from "./cbte-tipo.js";
@@ -93,6 +94,10 @@ export {
   ENDPOINTS,
   WSFE_NAMESPACE,
   WSFEX_NAMESPACE,
+  WSAA_SERVICES,
+  WSFE_ERRORES_INTERNOS,
+  WSFE_NUMERO_NO_CORRESPONDE,
+  TipoExpo,
   CbteTipo,
   Concepto,
   DocTipo,

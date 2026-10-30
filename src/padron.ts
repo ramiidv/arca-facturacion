@@ -8,11 +8,6 @@ import {
 import { toArray } from "./soap-client.js";
 import type { WsfeAuth, Contribuyente, ArcaEvent } from "./types.js";
 
-/** Servicio WSAA de la constancia de inscripción (ex Padrón A5, `ws_sr_padron_a5`). */
-export const PADRON_A5_SERVICE = "ws_sr_constancia_inscripcion";
-/** Servicio WSAA del Padrón A13. */
-export const PADRON_A13_SERVICE = "ws_sr_padron_a13";
-
 type R = Record<string, any>;
 
 function nombreDe(p: R): string {
