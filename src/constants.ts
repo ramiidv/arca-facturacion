@@ -130,19 +130,8 @@ export enum DocTipo {
 // Condición de IVA del receptor
 // ============================================================
 
-export enum CondicionIva {
-  RESPONSABLE_INSCRIPTO = 1,
-  EXENTO = 4,
-  CONSUMIDOR_FINAL = 5,
-  MONOTRIBUTISTA = 6,
-  NO_CATEGORIZADO = 7,
-  PROVEEDOR_EXTERIOR = 8,
-  CLIENTE_EXTERIOR = 9,
-  IVA_LIBERADO = 10,
-  MONOTRIBUTO_SOCIAL = 13,
-  IVA_NO_ALCANZADO = 15,
-  MONOTRIBUTO_INDEPENDIENTE_PROMOVIDO = 16,
-}
+// Definido en @ramiidv/arca-common para compartirlo con arca-padron.
+export { CondicionIva } from "@ramiidv/arca-common";
 
 // ============================================================
 // Tipos de IVA (alícuotas)
