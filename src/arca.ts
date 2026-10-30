@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { WsaaClient } from "./wsaa.js";
 import { WsfeClient } from "./wsfe.js";
 import { WsfexClient } from "./wsfex.js";
-import { PadronClient } from "./padron.js";
+import { PadronClient, PADRON_A5_SERVICE } from "./padron.js";
 import {
   buildInvoiceDetail,
   parseFacturaResult,
@@ -548,7 +548,7 @@ export class Arca {
    * Incluye domicilio fiscal, actividades, etc.
    */
   async consultarCuitDetalle(cuit: number): Promise<Contribuyente> {
-    const auth = await this.getAuth("ws_sr_padron_a5");
+    const auth = await this.getAuth(PADRON_A5_SERVICE);
     return this.padron.getPersonaA5(auth, cuit);
   }
 
@@ -738,7 +738,7 @@ export class Arca {
   clearAuthCache(): void {
     this.wsaa.clearTicket("wsfe");
     this.wsaa.clearTicket("wsfex");
-    this.wsaa.clearTicket("ws_sr_padron_a5");
+    this.wsaa.clearTicket(PADRON_A5_SERVICE);
     this.wsaa.clearTicket("ws_sr_padron_a13");
   }
 
