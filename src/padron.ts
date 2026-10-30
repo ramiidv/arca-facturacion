@@ -1,55 +1,92 @@
+import { afipSoapCall as unqualifiedSoapCall } from "@ramiidv/arca-common";
+import type { CallOptions } from "@ramiidv/arca-common";
 import {
   ENDPOINTS,
   PADRON_A5_NAMESPACE,
   PADRON_A13_NAMESPACE,
 } from "./constants.js";
-import { afipSoapCall, toArray } from "./soap-client.js";
-import type { SoapOptions } from "./soap-client.js";
+import { toArray } from "./soap-client.js";
 import type { WsfeAuth, Contribuyente, ArcaEvent } from "./types.js";
 
-function parsePersona(raw: Record<string, any>): Contribuyente {
-  const persona = raw.personaReturn?.persona ?? raw.personaReturn ?? raw;
+/** Servicio WSAA de la constancia de inscripción (ex Padrón A5, `ws_sr_padron_a5`). */
+export const PADRON_A5_SERVICE = "ws_sr_constancia_inscripcion";
+/** Servicio WSAA del Padrón A13. */
+export const PADRON_A13_SERVICE = "ws_sr_padron_a13";
 
-  const nombre =
-    persona.razonSocial ??
-    [persona.apellido, persona.nombre].filter(Boolean).join(" ") ??
-    "";
+type R = Record<string, any>;
 
-  const domFiscal = persona.domicilio
-    ? Array.isArray(persona.domicilio)
-      ? persona.domicilio[0]
-      : persona.domicilio
-    : undefined;
+function nombreDe(p: R): string {
+  if (p.razonSocial) return String(p.razonSocial);
+  return [p.apellido, p.nombre].filter(Boolean).join(" ");
+}
 
-  const impuestos = persona.impuesto
-    ? toArray(persona.impuesto).map((i: any) => ({
-        id: i.idImpuesto ?? i.id ?? 0,
-        descripcion: i.descripcionImpuesto ?? i.descripcion ?? "",
-        estado: i.estado ?? "",
-      }))
-    : undefined;
+function domicilio(d: R | undefined): Contribuyente["domicilioFiscal"] {
+  if (!d) return undefined;
+  const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
+  return {
+    direccion: str(d.direccion),
+    localidad: str(d.localidad),
+    codPostal: str(d.codPostal ?? d.codigoPostal),
+    tipoDomicilio: str(d.tipoDomicilio),
+  };
+}
+
+/** Parsea `personaReturn` de Padrón A13 (`getPersona`). */
+export function parsePersonaA13(result: R): Contribuyente {
+  const persona: R = result.persona ?? result;
+  const domicilios = toArray<R>(persona.domicilio);
+  const fiscal = domicilios.find((d) => d.tipoDomicilio === "FISCAL") ?? domicilios[0];
 
   return {
-    cuit: persona.idPersona ?? 0,
-    nombre,
+    cuit: Number(persona.idPersona ?? 0),
+    nombre: nombreDe(persona),
     tipoPersona: persona.tipoPersona ?? "",
     estadoClave: persona.estadoClave ?? "",
-    domicilioFiscal: domFiscal
-      ? {
-          direccion: domFiscal.direccion,
-          localidad: domFiscal.localidad,
-          codPostal: domFiscal.codPostal,
-          tipoDomicilio: domFiscal.tipoDomicilio,
-        }
-      : undefined,
-    impuestos,
+    domicilioFiscal: domicilio(fiscal),
     raw: persona,
   };
 }
 
+/** Parsea `personaReturn` de la constancia de inscripción (`getPersona_v2`). */
+export function parsePersonaA5(result: R): Contribuyente {
+  const generales: R = result.datosGenerales ?? {};
+  const error: R | undefined = result.errorConstancia;
+  const impuestos = [
+    ...toArray<R>(result.datosRegimenGeneral?.impuesto),
+    ...toArray<R>(result.datosMonotributo?.impuesto),
+  ].map((i) => ({
+    id: Number(i.idImpuesto ?? 0),
+    descripcion: String(i.descripcionImpuesto ?? ""),
+    estado: String(i.estadoImpuesto ?? i.estado ?? ""),
+  }));
+
+  return {
+    cuit: Number(generales.idPersona ?? error?.idPersona ?? 0),
+    nombre: nombreDe(Object.keys(generales).length > 0 ? generales : (error ?? {})),
+    tipoPersona: generales.tipoPersona ?? "",
+    estadoClave: generales.estadoClave ?? "",
+    domicilioFiscal: domicilio(generales.domicilioFiscal),
+    impuestos,
+    raw: result,
+  };
+}
+
+/**
+ * Cliente de Padrón incluido en arca-facturacion.
+ *
+ * @deprecated Usar `@ramiidv/arca-padron`, que cubre la constancia de
+ * inscripción, A4, A10, A13 y A100 con tipos completos y helpers como
+ * `condicionIvaDesdePadron`. Este cliente se mantiene por compatibilidad y se
+ * va a quitar en una próxima major.
+ */
 export class PadronClient {
   private production: boolean;
-  private soapOpts: Omit<SoapOptions, "soapAction">;
+  private soapOpts: {
+    timeout?: number;
+    retries?: number;
+    retryDelayMs?: number;
+    onEvent?: (event: ArcaEvent) => void;
+  };
 
   constructor(
     production: boolean,
@@ -62,7 +99,7 @@ export class PadronClient {
   ) {
     this.production = production;
     this.soapOpts = {
-      timeoutMs: opts.timeoutMs,
+      timeout: opts.timeoutMs,
       retries: opts.retries,
       retryDelayMs: opts.retryDelayMs,
       onEvent: opts.onEvent,
@@ -70,58 +107,64 @@ export class PadronClient {
   }
 
   /**
-   * Consulta datos de un contribuyente usando el padrón A13 (básico).
-   * Requiere cert con acceso a ws_sr_padron_a13.
+   * Los WS de Padrón declaran sus parámetros sin namespace
+   * (`elementFormDefault="unqualified"`), a diferencia de WSFE: se usa el
+   * `afipSoapCall` de arca-common, que prefija el método y deja los
+   * parámetros sin namespace. Orden según el WSDL: token, sign,
+   * cuitRepresentada, idPersona.
+   */
+  private getPersona(
+    endpoint: string,
+    namespace: string,
+    method: string,
+    auth: WsfeAuth,
+    cuit: number,
+    opts?: CallOptions
+  ): Promise<Record<string, unknown>> {
+    return unqualifiedSoapCall(
+      endpoint,
+      namespace,
+      method,
+      {
+        token: auth.Token,
+        sign: auth.Sign,
+        cuitRepresentada: auth.Cuit,
+        idPersona: cuit,
+      },
+      { ...this.soapOpts, signal: opts?.signal }
+    );
+  }
+
+  /**
+   * Consulta datos de un contribuyente usando el padrón A13.
+   * Requiere cert con acceso a `ws_sr_padron_a13`.
    */
   async getPersonaA13(
     auth: WsfeAuth,
-    cuit: number
+    cuit: number,
+    opts?: CallOptions
   ): Promise<Contribuyente> {
     const endpoint = this.production
       ? ENDPOINTS.padronA13.production
       : ENDPOINTS.padronA13.testing;
-
-    const result = await afipSoapCall(
-      endpoint,
-      PADRON_A13_NAMESPACE,
-      "getPersona",
-      {
-        token: auth.Token,
-        sign: auth.Sign,
-        cuitRepresentada: auth.Cuit,
-        idPersona: cuit,
-      },
-      this.soapOpts
-    );
-
-    return parsePersona(result);
+    const result = await this.getPersona(endpoint, PADRON_A13_NAMESPACE, "getPersona", auth, cuit, opts);
+    return parsePersonaA13(result);
   }
 
   /**
-   * Consulta datos detallados de un contribuyente usando el padrón A5.
-   * Requiere cert con acceso a ws_sr_padron_a5 (autorización adicional).
+   * Consulta la constancia de inscripción (ex Padrón A5) de un contribuyente,
+   * con domicilio fiscal e impuestos. Requiere cert con acceso a
+   * `ws_sr_constancia_inscripcion`.
    */
   async getPersonaA5(
     auth: WsfeAuth,
-    cuit: number
+    cuit: number,
+    opts?: CallOptions
   ): Promise<Contribuyente> {
     const endpoint = this.production
       ? ENDPOINTS.padronA5.production
       : ENDPOINTS.padronA5.testing;
-
-    const result = await afipSoapCall(
-      endpoint,
-      PADRON_A5_NAMESPACE,
-      "getPersona",
-      {
-        token: auth.Token,
-        sign: auth.Sign,
-        cuitRepresentada: auth.Cuit,
-        idPersona: cuit,
-      },
-      this.soapOpts
-    );
-
-    return parsePersona(result);
+    const result = await this.getPersona(endpoint, PADRON_A5_NAMESPACE, "getPersona_v2", auth, cuit, opts);
+    return parsePersonaA5(result);
   }
 }
