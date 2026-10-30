@@ -1,7 +1,7 @@
-# arca-sdk
+# @ramiidv/arca-facturacion
 
-[![CI](https://github.com/ramiidv/arca-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/ramiidv/arca-sdk/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@ramiidv/arca-sdk)](https://www.npmjs.com/package/@ramiidv/arca-sdk)
+[![CI](https://github.com/ramiidv/arca-facturacion/actions/workflows/ci.yml/badge.svg)](https://github.com/ramiidv/arca-facturacion/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@ramiidv/arca-facturacion)](https://www.npmjs.com/package/@ramiidv/arca-facturacion)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 
@@ -12,12 +12,12 @@ Soporta **todos los tipos de comprobante** de WSFEv1 y WSFEX: Facturas, Notas de
 ## Instalación
 
 ```bash
-npm install @ramiidv/arca-sdk
+npm install @ramiidv/arca-facturacion
 ```
 
 ## Requisitos
 
-- Node.js >= 18
+- Node.js >= 18. Se publica en ESM y CommonJS: funciona con `import` y con `require` (incluido TypeScript con `"module": "CommonJS"`).
 - Certificado digital X.509 y clave privada de ARCA
   - **Testing**: generalo desde [WSASS Homologación](https://wsass-homo.afip.gob.ar/wsass/portal/main.aspx)
   - **Producción**: generalo desde [Administración de Certificados Digitales](https://www.afip.gob.ar/ws/documentacion/certificados.asp) (requiere clave fiscal en [arca.gob.ar](https://arca.gob.ar))
@@ -26,7 +26,7 @@ npm install @ramiidv/arca-sdk
 
 ```typescript
 import fs from "fs";
-import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-facturacion";
 
 const arca = new Arca({
   cuit: 20123456789,
@@ -53,7 +53,13 @@ if (result.aprobada) {
 }
 ```
 
-El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), agrupa alícuotas de IVA, y completa `CondicionIVAReceptorId` (obligatorio desde abril 2026) para consumidor final. Valida todos los campos requeridos antes de enviar a ARCA.
+El SDK calcula automáticamente: IVA, totales (neto, IVA, exento, no gravado, tributos), número de comprobante, fecha (timezone Argentina), agrupa alícuotas de IVA, y completa `CondicionIVAReceptorId` para consumidor final sin identificar. Valida todos los campos requeridos antes de enviar a ARCA.
+
+> **`CondicionIVAReceptorId`** es obligatorio según la RG 5616: ARCA rechaza los comprobantes sin
+> este dato desde el **01/12/2026** (manual WSFEv1 v4.8; el v4.7 publicado lo remite a la RG 5616).
+> Si el receptor está identificado (`docTipo` distinto de 99), `condicionIva` es obligatoria: el SDK
+> no la infiere porque un CUIT puede ser RI, monotributista o exento. Podés obtenerla del padrón con
+> `condicionIvaDesdePadron` de [`@ramiidv/arca-padron`](https://github.com/ramiidv/arca-padron).
 
 ## Configuración
 
@@ -65,13 +71,94 @@ const arca = new Arca({
   production: false,           // Default: false (testing/homologación)
   tokenTTLMinutes: 720,        // Default: 720 (12 horas)
   requestTimeoutMs: 30_000,    // Default: 30000 (30 segundos)
-  retries: 1,                  // Default: 1 (reintentos en errores transitorios)
+  retries: 1,                  // Default: 1 (solo consultas; las emisiones nunca se reintentan)
   retryDelayMs: 1_000,         // Default: 1000 (backoff exponencial: 1s, 2s, ...)
+  ticketStorage: new FileTicketStorage("./.arca-tickets"), // Recomendado: persistir el TA
+  clockOffsetMs: 0,            // Default: 0. Desfase relojARCA - relojLocal
+  autoClockSkew: true,         // Default: true. Ajusta el desfase si WSAA lo rechaza
+  signal: shutdown.signal,     // Opcional: cancela todas las llamadas (ej: al apagar)
   onEvent: (e) => {            // Opcional: callback para logging/debugging
     console.log(e.type, e);
   },
 });
 ```
+
+> **Persistí el Ticket de Acceso.** WSAA rechaza el login si ya existe un TA vigente para el
+> certificado. Sin `ticketStorage`, cada reinicio del proceso te deja sin poder facturar hasta
+> que venza el TA anterior (hasta 12 horas, `ArcaTicketVigenteError`). Usá `FileTicketStorage`
+> o implementá `TicketStorage` sobre tu base de datos (ver `@ramiidv/arca-common`).
+
+## Emisión segura: nunca un estado ambiguo
+
+Cuando una factura se envía a ARCA pueden pasar tres cosas:
+
+| Resultado | Qué lanza / devuelve el SDK | ¿Se emitió? |
+| --- | --- | --- |
+| ARCA autorizó | `FacturaResult` con `aprobada: true` y `cae` | Sí |
+| ARCA rechazó | `ArcaWSFEError` (errores) o `aprobada: false` (observaciones) | No |
+| No se sabe (timeout, conexión cortada, HTTP 5xx, respuesta ilegible) | `ArcaResultadoIncierto` | **Hay que averiguarlo** |
+
+Las emisiones (`FECAESolicitar`, `FECAEARegInformativo`, `FECAEASinMovimientoInformar`, `FEXAuthorize`)
+**nunca se reintentan**: si ARCA otorgó el CAE y la respuesta se perdió, un reintento automático
+chocaría con la numeración. `retries` aplica solo a consultas.
+
+Para resolver un resultado incierto, `recuperarComprobante(intento)` devuelve:
+
+- `{ estado: "autorizado", resultado }`: ARCA lo autorizó; `resultado` tiene el CAE.
+- `{ estado: "no_emitido" }`: no existe; reintentar **con el mismo `cbteNro`** es seguro.
+- `{ estado: "conflicto", encontrado }`: ese número existe con otros datos (lo usó otra emisión).
+
+Pasar `cbteNro` explícito es lo que hace seguro el reintento: si el intento original llegara a
+autorizarse más tarde, ARCA rechaza el duplicado (error 10016), nunca emite dos comprobantes.
+Sin `cbteNro`, el SDK usa el último autorizado + 1 y **no hay lock**: serializá las emisiones por
+(punto de venta, tipo de comprobante).
+
+### Ejemplo: worker con cola
+
+```typescript
+import {
+  Arca, ArcaResultadoIncierto, ArcaWSFEError, CbteTipo, IvaTipo, FileTicketStorage,
+} from "@ramiidv/arca-facturacion";
+
+const arca = new Arca({ cuit, cert, key, production: true, ticketStorage: new FileTicketStorage("./.arca") });
+
+async function emitir(job: Job) {
+  // 1. Reservar el número y guardar el intento ANTES de enviar.
+  //    Si el proceso se cae a mitad del envío, el intento queda en la DB.
+  const cbteNro = (await arca.ultimoComprobante(job.ptoVta, CbteTipo.FACTURA_B)) + 1;
+  const opts = {
+    ptoVta: job.ptoVta,
+    cbteTipo: CbteTipo.FACTURA_B,
+    cbteNro,
+    items: job.items.map((i) => ({ total: i.precio, iva: IvaTipo.IVA_21 })), // precios con IVA
+    descuentoGlobal: job.descuento,
+  };
+  const { intento } = arca.armarComprobante(opts);
+  await db.jobs.update(job.id, { estado: "enviando", opts, intento });
+
+  try {
+    const res = await arca.facturar(opts);
+    if (!res.aprobada) return db.jobs.update(job.id, { estado: "rechazado", obs: res.observaciones });
+    return db.jobs.update(job.id, { estado: "autorizado", cae: res.cae, vto: res.caeVencimiento });
+  } catch (e) {
+    if (e instanceof ArcaWSFEError) return db.jobs.update(job.id, { estado: "rechazado", errores: e.errors });
+    if (e instanceof ArcaResultadoIncierto) return db.jobs.update(job.id, { estado: "incierto" });
+    throw e; // validación, auth, sin conexión (no se envió): reintentar el job más tarde
+  }
+}
+
+// Al arrancar y periódicamente: resolver los "enviando" (proceso caído) y los "incierto".
+async function resolver(job: Job) {
+  const r = await arca.recuperarComprobante(job.intento);
+  if (r.estado === "autorizado") return db.jobs.update(job.id, { estado: "autorizado", cae: r.resultado.cae });
+  if (r.estado === "no_emitido") return emitirDeNuevoConElMismoNumero(job); // mismo opts, mismo cbteNro
+  return db.jobs.update(job.id, { estado: "conflicto", encontrado: r.encontrado }); // revisión manual
+}
+```
+
+> Si la respuesta se perdió por timeout, esperá unos segundos antes de `recuperarComprobante`:
+> ARCA puede seguir procesando el request original. Aunque responda `no_emitido` antes de tiempo,
+> el reintento con el mismo número es seguro.
 
 ## Ejemplos
 
@@ -140,9 +227,45 @@ const result = await arca.facturar({
 // ImpNeto: 5000, ImpIVA: 0, ImpTotal: 5000
 ```
 
+### Precios con IVA incluido y descuento global
+
+En un punto de venta los precios suelen ser finales. Cada item lleva `neto` (sin IVA) **o**
+`total` (IVA incluido), nunca ambos:
+
+```typescript
+const result = await arca.facturar({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_B,
+  items: [
+    { total: 4500, iva: IvaTipo.IVA_21 },    // plato principal
+    { total: 1800.5, iva: IvaTipo.IVA_21 },  // bebida
+    { total: 300, exento: true },
+  ],
+  descuentoGlobal: 660.05, // monto final, se prorratea entre alícuotas, exento y no gravado
+});
+```
+
+Los importes se calculan en centavos: la suma de `BaseImp` + `Importe` de las alícuotas + exento +
+no gravado + tributos da exactamente `ImpTotal`. El resto de redondeo del prorrateo del descuento
+se asigna al grupo de mayor base.
+
+### Elegir el tipo de comprobante
+
+```typescript
+import { resolverCbteTipo, CondicionIva } from "@ramiidv/arca-facturacion";
+
+resolverCbteTipo(CondicionIva.RESPONSABLE_INSCRIPTO, CondicionIva.CONSUMIDOR_FINAL); // FACTURA_B
+resolverCbteTipo(CondicionIva.RESPONSABLE_INSCRIPTO, CondicionIva.MONOTRIBUTISTA);   // FACTURA_A
+resolverCbteTipo(CondicionIva.MONOTRIBUTISTA, CondicionIva.RESPONSABLE_INSCRIPTO);   // FACTURA_C
+resolverCbteTipo(CondicionIva.RESPONSABLE_INSCRIPTO, CondicionIva.RESPONSABLE_INSCRIPTO, "nota_credito"); // NOTA_CREDITO_A
+```
+
+Reglas según RG 1415, RG 5003/2021 y la tabla de condiciones por clase del manual WSFEv1.
+
 ### Nota de crédito
 
 El tipo de NC se infiere automáticamente del comprobante original (FACTURA_B → NOTA_CREDITO_B).
+Acepta las mismas opciones que `facturar` (incluidos `cbteNro`, `total` y `descuentoGlobal`).
 
 ```typescript
 const result = await arca.notaCredito({
@@ -225,17 +348,20 @@ if (result.aprobada) {
 
 ### Consultar contribuyente (Padrón)
 
+> **Deprecado**: usá [`@ramiidv/arca-padron`](https://github.com/ramiidv/arca-padron), que además
+> tiene `condicionIvaDesdePadron`. Estos métodos se mantienen por compatibilidad.
+
 ```typescript
-// Consulta básica por CUIT (padrón A13)
+// Consulta básica por CUIT (padrón A13, servicio ws_sr_padron_a13)
 const persona = await arca.consultarCuit(30712345678);
 console.log(persona.nombre);       // "EMPRESA SA"
 console.log(persona.tipoPersona);  // "JURIDICA"
 console.log(persona.estadoClave);  // "ACTIVO"
-console.log(persona.impuestos);    // [{ id: 30, descripcion: "IVA", estado: "AC" }]
 
-// Consulta detallada (padrón A5 — requiere autorización adicional)
+// Constancia de inscripción (ex padrón A5, servicio ws_sr_constancia_inscripcion)
 const detalle = await arca.consultarCuitDetalle(20123456789);
 console.log(detalle.domicilioFiscal); // { direccion, localidad, codPostal }
+console.log(detalle.impuestos);       // [{ id: 30, descripcion: "IVA", estado: "AC" }]
 ```
 
 ### CAEA — Facturación offline / contingencia
@@ -259,16 +385,28 @@ await arca.sinMovimientoCAEA(caea.CAEA, 5);
 const existente = await arca.consultarCAEA("202604", 1);
 ```
 
-### Previsualizar totales sin enviar
+### Previsualizar o armar sin enviar
 
 ```typescript
-const { importes, iva } = Arca.calcularTotales([
+import { armarComprobante, calcularTotales } from "@ramiidv/arca-facturacion";
+
+const { importes, iva } = calcularTotales([
   { neto: 1000, iva: IvaTipo.IVA_21 },
   { neto: 500, iva: IvaTipo.IVA_10_5 },
 ]);
 console.log(importes);
 // { total: 1762.5, neto: 1500, iva: 262.5, exento: 0, noGravado: 0, tributos: 0 }
+
+// Detalle completo, listo para FECAESolicitar, sin red. Valida igual que facturar().
+const { request, importes: imp, intento } = armarComprobante({
+  ptoVta: 1,
+  cbteTipo: CbteTipo.FACTURA_B,
+  cbteNro: 151,
+  items: [{ total: 1210, iva: IvaTipo.IVA_21 }],
+});
 ```
+
+`Arca.calcularTotales` y `arca.armarComprobante` (que usa el reloj de ARCA para la fecha) siguen disponibles.
 
 ### QR para factura impresa
 
@@ -308,7 +446,9 @@ const result = await arca.facturar({
 
 ## Retry automático
 
-El SDK reintenta automáticamente en errores transitorios (timeout, HTTP 5xx, errores de red). No reintenta en errores de negocio (4xx, errores de ARCA).
+El SDK reintenta automáticamente **las consultas** (último comprobante, consultas, parámetros, login
+WSAA, padrón) en errores transitorios: timeout, errores de red y HTTP 5xx sin SOAP Fault. No reintenta
+errores de negocio ni SOAP Faults. **Las emisiones nunca se reintentan** (ver "Emisión segura").
 
 - **Default**: 1 reintento con backoff exponencial (1s, 2s, ...)
 - **Configurable**: `retries: 0` para desactivar, `retries: 3` para más intentos
@@ -349,10 +489,12 @@ arca.on("request:retry", (e) => {
 | Evento | Cuándo | Datos |
 | --- | --- | --- |
 | `auth:login` | Nuevo token obtenido | `service`, `durationMs` |
-| `auth:cache-hit` | Token cacheado reutilizado | `service` |
+| `auth:cache-hit` | Token reutilizado | `service`, `source` (`memory` / `storage`) |
+| `auth:clock-skew` | Se ajustó el desfase de reloj | `service`, `offsetMs`, `previousOffsetMs` |
+| `auth:storage-error` | Falló el `ticketStorage` (no interrumpe) | `service`, `operation`, `error` |
 | `request:start` | Antes de una llamada SOAP | `method`, `endpoint` |
 | `request:end` | Llamada SOAP completada | `method`, `durationMs` |
-| `request:retry` | Reintentando tras error | `method`, `attempt`, `delayMs`, `error` |
+| `request:retry` | Reintentando tras error (solo consultas) | `method`, `attempt`, `error` |
 | `request:error` | Llamada SOAP falló | `method`, `error` |
 
 ## Manejo de errores
@@ -363,39 +505,62 @@ El SDK provee clases de error específicas para catch granular:
 import {
   Arca,
   ArcaAuthError,
+  ArcaTicketVigenteError,
+  ArcaResultadoIncierto,
+  ArcaValidationError,
   ArcaWSFEError,
   ArcaSoapError,
-} from "@ramiidv/arca-sdk";
+} from "@ramiidv/arca-facturacion";
 
 try {
   const result = await arca.facturar({ ... });
 } catch (e) {
-  if (e instanceof ArcaAuthError) {
-    // Error de autenticación WSAA (certificado inválido, expirado, etc.)
-    console.error("Auth error:", e.message);
-    arca.clearAuthCache(); // Limpiar cache e intentar de nuevo
-  }
-
-  if (e instanceof ArcaWSFEError) {
-    // Error de WSFE/WSFEX con códigos de ARCA
-    for (const err of e.errors) {
-      console.error(`[${err.code}] ${err.msg}`);
+  if (e instanceof ArcaResultadoIncierto) {
+    // No se sabe si se emitió: guardar e.intento y resolver con recuperarComprobante
+    const r = await arca.recuperarComprobante(e.intento);
+  } else if (e instanceof ArcaWSFEError) {
+    // ARCA rechazó el comprobante (no se emitió)
+    for (const err of e.errors) console.error(`[${err.code}] ${err.msg}`);
+    if (e.tieneCodigo(10016)) {
+      // "número no corresponde con el próximo": quizá un intento anterior sí se autorizó
     }
-  }
-
-  if (e instanceof ArcaSoapError) {
-    // Error HTTP/SOAP (timeout, servidor caído, etc.)
-    console.error("HTTP status:", e.statusCode);
+  } else if (e instanceof ArcaValidationError) {
+    console.error(e.field, e.details); // datos inválidos, no se envió nada
+  } else if (e instanceof ArcaTicketVigenteError) {
+    // WSAA ya emitió un TA que no tenemos (falta ticketStorage): esperar a que venza
+  } else if (e instanceof ArcaAuthError) {
+    // Error de autenticación WSAA (certificado inválido, expirado, etc.)
+  } else if (e instanceof ArcaSoapError) {
+    // Error HTTP/SOAP en una consulta, o emisión que con certeza no se envió (sin conexión)
+    console.error("HTTP status:", e.statusCode, "incierto:", e.uncertain);
   }
 }
 ```
 
-| Clase | Cuándo se lanza |
-| --- | --- |
-| `ArcaAuthError` | Falla en login WSAA, respuesta inesperada, token/sign inválidos |
-| `ArcaWSFEError` | Error devuelto por WSFE/WSFEX (campos inválidos, CUIT no autorizado, etc.). Contiene `errors: { code, msg }[]` |
-| `ArcaSoapError` | Error HTTP, timeout, SOAP Fault. Contiene `statusCode?: number` |
-| `ArcaError` | Clase base para todos los errores del SDK |
+| Clase | `code` | Cuándo se lanza |
+| --- | --- | --- |
+| `ArcaResultadoIncierto` | `ARCA_RESULTADO_INCIERTO` | Emisión sin respuesta confiable. Contiene `intento`, `intentos`, `operacion` |
+| `ArcaWSFEError` | `ARCA_WSFE_ERROR` | Error devuelto por WSFE/WSFEX (no se emitió). Contiene `errors: { code, msg }[]` y `tieneCodigo(code)` |
+| `ArcaValidationError` | `ARCA_VALIDATION_ERROR` | Datos de entrada inválidos. Contiene `field` y `details` |
+| `ArcaTicketVigenteError` | `ARCA_TICKET_VIGENTE` | WSAA ya emitió un TA vigente que no está en memoria ni en el storage |
+| `ArcaAuthError` | `ARCA_AUTH_ERROR` | Falla en login WSAA, respuesta inesperada, token/sign inválidos |
+| `ArcaSoapError` | `ARCA_SOAP_ERROR` | Error HTTP, timeout, SOAP Fault. Contiene `statusCode?`, `faultString?`, `uncertain`, `aborted` |
+| `ArcaError` | `ARCA_ERROR` | Clase base para todos los errores del SDK |
+
+`instanceof` funciona aunque haya más de una copia del paquete cargada (por ejemplo ESM y CommonJS en
+el mismo proceso), y `code` sirve para persistir o comparar sin `instanceof`.
+
+### Cancelación
+
+Todos los métodos aceptan un último parámetro opcional `{ signal }`, que se combina con el `signal`
+de la config:
+
+```typescript
+await arca.ultimoComprobante(1, CbteTipo.FACTURA_B, { signal: AbortSignal.timeout(10_000) });
+```
+
+Abortar una emisión **después de enviada** deja el resultado incierto (`ArcaResultadoIncierto`).
+Abortar antes de enviar no envía nada.
 
 ## Consultas
 
@@ -438,9 +603,15 @@ const maxRegs = await arca.getCantMaxRegistros();
 | `production` | `boolean` | `false` | Entorno de producción |
 | `tokenTTLMinutes` | `number` | `720` | TTL del token en minutos |
 | `requestTimeoutMs` | `number` | `30000` | Timeout HTTP en milisegundos |
-| `retries` | `number` | `1` | Reintentos en errores transitorios |
+| `retries` | `number` | `1` | Reintentos en consultas (las emisiones nunca se reintentan) |
 | `retryDelayMs` | `number` | `1000` | Delay inicial entre reintentos (exponencial) |
 | `onEvent` | `function` | — | Callback para eventos del SDK |
+| `paramCacheTTLMs` | `number` | `86400000` | TTL del cache de parámetros (0 = sin cache) |
+| `ticketStorage` | `TicketStorage` | — | Persistencia del TA entre reinicios (recomendado) |
+| `clockOffsetMs` | `number` | `0` | Desfase `relojARCA - relojLocal` en ms |
+| `autoClockSkew` | `boolean` | `true` | Ajustar el desfase si WSAA rechaza el login por reloj |
+| `signal` | `AbortSignal` | — | Cancela todas las llamadas de la instancia |
+| `wsaa` | `WsaaClient` | — | Cliente WSAA compartido (ej: con `ArcaPadron`) |
 
 ### Facturación — API simplificada
 
@@ -449,6 +620,8 @@ const maxRegs = await arca.getCantMaxRegistros();
 | `facturar(opts)` | Crea un comprobante con cálculo automático de IVA y totales |
 | `notaCredito(opts)` | Crea nota de crédito asociada (tipo NC inferido automáticamente) |
 | `notaDebito(opts)` | Crea nota de débito asociada (tipo ND inferido automáticamente) |
+| `armarComprobante(opts)` | Valida y arma el comprobante sin enviarlo; devuelve `request`, `importes` e `intento` |
+| `recuperarComprobante(intento)` | Resuelve un resultado incierto: `autorizado`, `no_emitido` o `conflicto` |
 | `facturarExpo(opts)` | Factura de exportación con auto ID, numeración y cálculo de totales |
 | `registrarFacturaCAEA(caea, opts)` | Registra factura con CAEA (misma interfaz que `facturar()`) |
 
@@ -498,8 +671,8 @@ Retornan `FacturaResult` / `FacturaExpoResult` con: `aprobada`, `cae`, `caeVenci
 
 | Método | Descripción |
 | --- | --- |
-| `consultarCuit(cuit)` | Datos básicos de un contribuyente (padrón A13) |
-| `consultarCuitDetalle(cuit)` | Datos detallados con domicilio (padrón A5) |
+| `consultarCuit(cuit)` | **Deprecado.** Datos básicos de un contribuyente (padrón A13) |
+| `consultarCuitDetalle(cuit)` | **Deprecado.** Constancia de inscripción (ex A5): domicilio fiscal e impuestos |
 
 Retornan `Contribuyente` con: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `domicilioFiscal?`, `impuestos?`, `raw`.
 
@@ -532,6 +705,9 @@ Retornan `Contribuyente` con: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `d
 | Método | Descripción |
 | --- | --- |
 | `Arca.calcularTotales(items, opts?)` | Calcula importes e IVA sin enviar a ARCA |
+
+También se exportan como funciones: `armarComprobante`, `calcularTotales`, `resolverCbteTipo`,
+`intentoDesdeComprobante`, `coincideConIntento`, `facturaResultDesdeConsulta`, `toDateString`.
 | `Arca.generateQRUrl(input)` | Genera la URL del QR oficial de ARCA |
 | `Arca.extractCAE(result)` | Extrae CAE del resultado raw |
 | `Arca.formatDate(date)` | Formatea `Date` a `YYYYMMDD` (timezone Argentina) |
@@ -540,7 +716,8 @@ Retornan `Contribuyente` con: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `d
 
 | Método | Descripción |
 | --- | --- |
-| `clearAuthCache()` | Invalida los tickets de acceso cacheados |
+| `clearAuthCache()` | Invalida los tickets de acceso (memoria y `ticketStorage`). Devuelve `Promise<void>` |
+| `wsaa` | Cliente WSAA de la instancia, para compartirlo con otros SDKs |
 
 ## Tipos de comprobante soportados
 

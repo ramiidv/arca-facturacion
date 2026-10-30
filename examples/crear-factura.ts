@@ -14,7 +14,7 @@
  */
 
 import fs from "fs";
-import { Arca, CbteTipo, DocTipo, IvaTipo } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, DocTipo, IvaTipo } from "@ramiidv/arca-facturacion";
 
 async function main() {
   // 1. Inicializar el SDK

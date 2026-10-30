@@ -12,7 +12,7 @@
  */
 
 import fs from "fs";
-import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({

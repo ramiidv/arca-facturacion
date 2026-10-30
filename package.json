@@ -1,6 +1,6 @@
 {
   "name": "@ramiidv/arca-facturacion",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "SDK para Facturación Electrónica con ARCA (ex AFIP) - WSFE, WSFEX, CAEA, QR",
   "author": "ramiidv",
   "license": "MIT",
@@ -34,7 +34,7 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:smoke",
     "test:smoke": "node scripts/smoke.mjs Arca ArcaResultadoIncierto ArcaWSFEError armarComprobante resolverCbteTipo CbteTipo FileTicketStorage"
   },
   "keywords": [

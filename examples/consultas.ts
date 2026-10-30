@@ -3,7 +3,7 @@
  */
 
 import fs from "fs";
-import { Arca, CbteTipo, Moneda } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, Moneda } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({

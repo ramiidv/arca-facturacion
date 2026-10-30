@@ -1,5 +1,89 @@
 # Changelog
 
+## 3.0.0 (2026-10-30)
+
+Objetivo de esta versión: que cada comprobante termine **autorizado o con la certeza de que no se
+emitió**, nunca en un estado ambiguo.
+
+### Breaking changes
+- **Las emisiones nunca se reintentan.** `retries` aplica solo a consultas (último comprobante,
+  consultas, parámetros, login WSAA, padrón). Ante timeout, conexión cortada, HTTP 5xx, abort después
+  de enviar o respuesta ilegible en `FECAESolicitar` / `FECAEARegInformativo`, se lanza
+  `ArcaResultadoIncierto` (antes: `ArcaSoapError`, y el request se reintentaba).
+- **`condicionIva` obligatoria si el receptor está identificado** (`docTipo` distinto de 99) también en
+  `notaCredito` y `notaDebito`, que antes no validaban nada. La API raw (`crearFactura`) exige
+  `CondicionIVAReceptorId` en ese caso.
+- Los errores de validación son `ArcaValidationError` (con `field` y `details`). Siguen extendiendo
+  `ArcaError` y el mensaje sigue empezando con "Validación:".
+- El IVA de los items con `neto` se redondea por alícuota y no por item (puede cambiar un centavo en
+  facturas con muchos items de la misma alícuota; ahora la suma siempre es exacta).
+- `FacturaResult.raw` es `FECAESolicitarResult | FECompConsultarResult`.
+- `clearAuthCache()` devuelve `Promise<void>`.
+- `consultarCuitDetalle` usa la constancia de inscripción (`ws_sr_constancia_inscripcion`,
+  `getPersona_v2`): el certificado necesita esa autorización (A5 está deprecado por ARCA).
+- Requiere `@ramiidv/arca-common` ^0.3.0 (`AccessTicket.expirationTime` es un string ISO).
+
+### Features
+- `ArcaResultadoIncierto` con `intento` (`ptoVta`, `cbteTipo`, `cbteNro`, `importeTotal`, `docTipo`,
+  `docNro`, `fecha`), `intentos` y `operacion`.
+- `recuperarComprobante(intento)`: `autorizado` (con CAE), `no_emitido` o `conflicto`.
+- `cbteNro` opcional en `facturar`, `notaCredito`, `notaDebito` y `registrarFacturaCAEA`.
+- `armarComprobante(opts)`: función pura (también método de `Arca`) que valida y arma el comprobante
+  sin red, y devuelve `{ request, importes, intento }`.
+- Items con precio final: `{ total, iva }` además de `{ neto, iva }`.
+- `descuentoGlobal`, prorrateado entre alícuotas, exento y no gravado. Importes en centavos: la suma de
+  los componentes es exactamente `ImpTotal`.
+- `resolverCbteTipo(emisor, receptor, clase?)` según RG 1415, RG 5003/2021 y el manual WSFEv1.
+- `ticketStorage`, `clockOffsetMs`, `autoClockSkew`, `signal` y `wsaa` en `ArcaConfig`; `signal` por
+  llamada en todos los métodos. La fecha por defecto usa el reloj de ARCA.
+- `ArcaWSFEError.tieneCodigo(code)`; `code` estable en todos los errores; `instanceof` entre copias.
+- Exports de funciones puras: `armarComprobante`, `calcularTotales`, `resolverCbteTipo`,
+  `intentoDesdeComprobante`, `coincideConIntento`, `facturaResultDesdeConsulta`, `toDateString`.
+- Build dual ESM + CommonJS con `exports` condicional, y smoke test CommonJS/ESM en CI.
+
+### Fixes
+- Padrón A13 y constancia de inscripción no funcionaban contra ARCA: los parámetros heredaban el
+  namespace del método y la respuesta con prefijo (`ns2:getPersonaResponse`) no se reconocía (#1).
+- Documentación: el paquete es `@ramiidv/arca-facturacion` (el README decía `@ramiidv/arca-sdk`).
+- La fecha de obligatoriedad de `CondicionIVAReceptorId` es el 01/12/2026 (RG 5616, manual WSFEv1
+  v4.8), no abril 2026.
+
+### Deprecated
+- `PadronClient`, `consultarCuit` y `consultarCuitDetalle`: usar `@ramiidv/arca-padron`.
+
+### Migración de 2.x a 3.0
+
+1. **Persistí el ticket de acceso** (recomendado):
+   ```ts
+   new Arca({ ...config, ticketStorage: new FileTicketStorage("./.arca-tickets") });
+   ```
+2. **Manejá el resultado incierto.** Antes, un timeout en `facturar` se reintentaba (y podía chocar con
+   la numeración) o terminaba en `ArcaSoapError`. Ahora:
+   ```ts
+   try {
+     await arca.facturar({ ...opts, cbteNro });
+   } catch (e) {
+     if (e instanceof ArcaResultadoIncierto) {
+       const r = await arca.recuperarComprobante(e.intento);
+       // "autorizado" → usar r.resultado.cae; "no_emitido" → reintentar con el mismo cbteNro;
+       // "conflicto" → revisión manual
+     }
+   }
+   ```
+   Si tenías `catch (e) { if (e instanceof ArcaSoapError) reintentar() }` alrededor de `facturar`,
+   **quitalo**: reintentar una emisión sin recuperar primero es justamente lo que esta versión evita.
+3. **Pasá `condicionIva`** en NC/ND (y en facturas) cuando el receptor tiene `docTipo` distinto de 99.
+   Para obtenerla: `condicionIvaDesdePadron` de `@ramiidv/arca-padron`.
+4. Si capturabas errores de validación por clase, `ArcaValidationError` sigue siendo `instanceof ArcaError`.
+5. `await arca.clearAuthCache()`.
+6. Si usabas `consultarCuitDetalle`, autorizá `ws_sr_constancia_inscripcion` en el certificado
+   (o migrá a `@ramiidv/arca-padron`).
+7. Si leías `raw` de `FacturaResult` asumiendo `FECAESolicitarResult`, chequeá `"FeCabResp" in result.raw`.
+
+## 2.0.0 – 2.1.0
+
+- Renombre a `@ramiidv/arca-facturacion` y migración de WSAA/SOAP a `@ramiidv/arca-common`.
+
 ## 1.2.5
 
 - **Fix**: `Permiso_existente` now defaults to `""` for Servicios (2) and Otros (4) — was `"N"` which AFIP rejects
