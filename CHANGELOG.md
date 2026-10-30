@@ -24,6 +24,10 @@ emitió**, nunca en un estado ambiguo.
 - Requiere `@ramiidv/arca-common` ^0.3.0 (`AccessTicket.expirationTime` es un string ISO).
 
 ### Features
+- Los errores internos de ARCA (500, 501, 502) en una emisión se informan como `ArcaResultadoIncierto`,
+  no como rechazo.
+- `requiereRecuperacion(resultado | error)`: detecta la validación 10016 (número ya usado), que llega
+  como `aprobada: false` con observaciones y suele indicar que un intento anterior se autorizó.
 - `ArcaResultadoIncierto` con `intento` (`ptoVta`, `cbteTipo`, `cbteNro`, `importeTotal`, `docTipo`,
   `docNro`, `fecha`), `intentos` y `operacion`.
 - `recuperarComprobante(intento)`: `autorizado` (con CAE), `no_emitido` o `conflicto`.
@@ -42,11 +46,21 @@ emitió**, nunca en un estado ambiguo.
 - Build dual ESM + CommonJS con `exports` condicional, y smoke test CommonJS/ESM en CI.
 
 ### Fixes
+- `registrarFacturaCAEA` devuelve el CAEA en `cae` (antes `undefined`; FECAEARegInformativo no trae `CAE`).
+- Un listener (`onEvent` / `arca.on`) que lanzaba podía hacer fallar una emisión ya autorizada.
+- Importes con 3 decimales se redondean bien (1.005 → 1.01).
+- Se quitaron dependencias que no se usaban (`fast-xml-parser`, `node-forge`): XML y WSAA vienen de
+  arca-common.
 - Padrón A13 y constancia de inscripción no funcionaban contra ARCA: los parámetros heredaban el
   namespace del método y la respuesta con prefijo (`ns2:getPersonaResponse`) no se reconocía (#1).
 - Documentación: el paquete es `@ramiidv/arca-facturacion` (el README decía `@ramiidv/arca-sdk`).
 - La fecha de obligatoriedad de `CondicionIVAReceptorId` es el 01/12/2026 (RG 5616, manual WSFEv1
   v4.8), no abril 2026.
+
+### Limitaciones conocidas
+- En exportación (`facturarExpo`, `crearFacturaExportacion`) y en `sinMovimientoCAEA`, un resultado
+  incierto llega como `ArcaSoapError` con `uncertain: true` (no hay `recuperarComprobante` para WSFEX):
+  verificar con `consultarComprobanteExpo` antes de reenviar.
 
 ### Deprecated
 - `PadronClient`, `consultarCuit` y `consultarCuitDetalle`: usar `@ramiidv/arca-padron`.

@@ -19,6 +19,7 @@ import {
   CbteTipo,
   FileTicketStorage,
   IvaTipo,
+  requiereRecuperacion,
 } from "@ramiidv/arca-facturacion";
 import type { FacturarOpts, IntentoComprobante } from "@ramiidv/arca-facturacion";
 
@@ -34,14 +35,22 @@ const arca = new Arca({
 /** Simula la persistencia del worker (en una app real: la DB). */
 const db = new Map<string, { estado: string; opts: FacturarOpts; intento: IntentoComprobante; cae?: string }>();
 
-async function emitir(jobId: string, opts: FacturarOpts & { cbteNro: number }) {
+/** Envíos máximos de un mismo comprobante antes de dejarlo para revisión manual. */
+const MAX_ENVIOS = 3;
+
+async function emitir(jobId: string, opts: FacturarOpts & { cbteNro: number }, envio = 1) {
   try {
     const res = await arca.facturar(opts);
+    if (!res.aprobada && requiereRecuperacion(res)) {
+      // 10016: el número ya se usó; si fue un envío anterior nuestro, quedó autorizado.
+      db.set(jobId, { ...db.get(jobId)!, estado: "incierto" });
+      return resolver(jobId, envio);
+    }
     db.set(jobId, { ...db.get(jobId)!, estado: res.aprobada ? "autorizado" : "rechazado", cae: res.cae });
   } catch (e) {
     if (e instanceof ArcaResultadoIncierto) {
       db.set(jobId, { ...db.get(jobId)!, estado: "incierto" });
-      return resolver(jobId);
+      return resolver(jobId, envio);
     }
     if (e instanceof ArcaWSFEError) {
       db.set(jobId, { ...db.get(jobId)!, estado: "rechazado" });
@@ -52,7 +61,7 @@ async function emitir(jobId: string, opts: FacturarOpts & { cbteNro: number }) {
 }
 
 /** Resuelve un job "enviando" (el proceso se cayó) o "incierto". */
-async function resolver(jobId: string) {
+async function resolver(jobId: string, envio = 1) {
   const job = db.get(jobId)!;
   // ARCA puede seguir procesando el request original: esperar unos segundos.
   await new Promise((r) => setTimeout(r, 5_000));
@@ -64,8 +73,12 @@ async function resolver(jobId: string) {
       console.log(`Recuperado: CAE ${r.resultado.cae}`);
       break;
     case "no_emitido":
+      if (envio >= MAX_ENVIOS) {
+        db.set(jobId, { ...job, estado: "incierto" }); // reintentar más tarde (ARCA puede estar caído)
+        break;
+      }
       // Seguro: mismo número. Si el original se autorizara después, ARCA rechaza este (10016).
-      await emitir(jobId, { ...job.opts, cbteNro: job.intento.cbteNro });
+      await emitir(jobId, { ...job.opts, cbteNro: job.intento.cbteNro }, envio + 1);
       break;
     case "conflicto":
       db.set(jobId, { ...job, estado: "conflicto" });
@@ -84,6 +97,8 @@ async function main() {
     ptoVta,
     cbteTipo,
     cbteNro,
+    // Fijar la fecha: así el intento guardado y lo que se envía coinciden aunque pase la medianoche.
+    fecha: Arca.formatDate(arca.wsaa.now()),
     items: [
       { total: 4500, iva: IvaTipo.IVA_21 }, // precios finales, IVA incluido
       { total: 1800.5, iva: IvaTipo.IVA_21 },

@@ -22,6 +22,7 @@ import {
   ArcaWSFEError,
   ArcaSoapError,
   FileTicketStorage,
+  requiereRecuperacion,
 } from "@ramiidv/arca-facturacion";
 
 async function main() {
@@ -42,6 +43,11 @@ async function main() {
     });
 
     if (!result.aprobada) {
+      if (requiereRecuperacion(result)) {
+        // 10016: el número ya se usó; si hubo un intento previo, resolver con recuperarComprobante
+        console.error("El número no es el próximo: quizá un intento anterior sí se autorizó.");
+        return;
+      }
       // ARCA respondió pero rechazó el comprobante
       console.error("Rechazada:", result.observaciones);
       return;
@@ -66,9 +72,7 @@ async function main() {
       for (const err of e.errors) {
         console.error(`ARCA [${err.code}]: ${err.msg}`);
       }
-      if (e.tieneCodigo(10016)) {
-        console.error("El número no es el próximo: quizá un intento anterior sí se autorizó.");
-      }
+
     } else if (e instanceof ArcaSoapError) {
       // Consultas: timeout, HTTP 500, SOAP Fault. Emisiones: sin conexión (uncertain: false).
       console.error("Error de conexión:", e.message, "incierto:", e.uncertain);

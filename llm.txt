@@ -92,10 +92,11 @@ Every public method accepts an optional last argument `{ signal?: AbortSignal }`
 | Outcome | SDK result | Issued? |
 | --- | --- | --- |
 | Authorized | `FacturaResult` with `aprobada: true`, `cae` | yes |
-| Rejected | `ArcaWSFEError` (Errors) or `aprobada: false` (Resultado "R") | no |
-| Unknown (timeout, dropped connection, HTTP 5xx, unreadable response, abort after sending) | `ArcaResultadoIncierto` | must be resolved |
+| Rejected | `ArcaWSFEError` (Errors) or `aprobada: false` (Resultado "R") | no (see 10016) |
+| Unknown (timeout, dropped connection, HTTP 5xx, unreadable response, abort after sending, ARCA internal errors 500/501/502) | `ArcaResultadoIncierto` | must be resolved |
 
 - Emissions (FECAESolicitar, FECAEARegInformativo, FECAEASinMovimientoInformar, FEXAuthorize) are never retried.
+- `ArcaResultadoIncierto` + `recuperarComprobante` cover facturar, notaCredito, notaDebito, crearFactura, registrarFacturaCAEA, registrarCAEA. For exports (facturarExpo, crearFacturaExportacion) and sinMovimientoCAEA an uncertain outcome is `ArcaSoapError` with `uncertain: true`: verify (consultarComprobanteExpo / CAEA query) before resending.
 - No connectivity (DNS failure, connection refused) is NOT uncertain: `ArcaSoapError` with `uncertain: false` (nothing was sent).
 - `ArcaResultadoIncierto` has `intento: IntentoComprobante` (`{ ptoVta, cbteTipo, cbteNro, importeTotal, docTipo, docNro, fecha }`), `intentos` (all invoices of the request) and `operacion`.
 - `arca.recuperarComprobante(intento)` returns:
@@ -104,14 +105,16 @@ Every public method accepts an optional last argument `{ signal?: AbortSignal }`
   - `{ estado: "conflicto", encontrado: FECompConsultarResult }` otherwise.
 - Pass `cbteNro` explicitly to make retries idempotent: ARCA rejects a number already used (error 10016), so a duplicate can never be issued. Without `cbteNro` the SDK uses last + 1 with no lock: serialize emissions per (ptoVta, cbteTipo).
 - `arca.armarComprobante(opts & { cbteNro })` (or the pure `armarComprobante` function) returns `{ request, importes, intento }` without network: persist `intento` before sending so a crashed process can recover.
-- `ArcaWSFEError.tieneCodigo(10016)`: "number does not match next to authorize" usually means a previous attempt was authorized → call `recuperarComprobante`.
+- Validation 10016 ("number does not match next to authorize") arrives as `aprobada: false` with that observation (not as ArcaWSFEError). After a previous attempt it usually means that attempt WAS authorized → call `recuperarComprobante` before marking it rejected. `requiereRecuperacion(resultOrError)` detects it.
+- Pin `fecha` in the opts you persist: otherwise `armarComprobante` and `facturar` could compute different dates around midnight.
 
 ```typescript
-const opts = { ptoVta: 1, cbteTipo: CbteTipo.FACTURA_B, cbteNro: 151, items: [{ total: 1210, iva: IvaTipo.IVA_21 }] };
+const opts = { ptoVta: 1, cbteTipo: CbteTipo.FACTURA_B, cbteNro: 151, fecha: Arca.formatDate(arca.wsaa.now()), items: [{ total: 1210, iva: IvaTipo.IVA_21 }] };
 const { intento } = arca.armarComprobante(opts);
 await db.save({ estado: "enviando", opts, intento });
 try {
   const res = await arca.facturar(opts);
+  if (!res.aprobada && requiereRecuperacion(res)) { /* 10016: resolve with recuperarComprobante(intento) */ }
 } catch (e) {
   if (e instanceof ArcaResultadoIncierto) {
     const r = await arca.recuperarComprobante(e.intento);
@@ -285,7 +288,7 @@ await arca.getCantMaxRegistros();
 await arca.getCondicionesIva();          // valid CondicionIva values from ARCA
 
 // Utility
-await arca.clearAuthCache();             // invalidate auth tokens (memory + ticketStorage)
+await arca.clearAuthCache();             // invalidate auth tokens (memory + ticketStorage). WARNING: deleting a still-valid ticket locks you out until it expires (WSAA won't issue a new one)
 
 // Pure helpers (no network), also exported as functions
 armarComprobante(opts & { cbteNro });    // { request, importes, intento }
@@ -318,7 +321,7 @@ try {
   if (e instanceof ArcaWSFEError) {
     // ARCA business error: NOT issued
     e.errors; // { code: number, msg: string }[]
-    e.tieneCodigo(10016);
+    e.tieneCodigo(600);  // internal ARCA errors 500/501/502 come as ArcaResultadoIncierto instead
   }
   if (e instanceof ArcaValidationError) {
     e.field; e.details; // nothing was sent
