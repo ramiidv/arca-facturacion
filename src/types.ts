@@ -191,8 +191,11 @@ export interface FECAEDetResponse {
   CbteHasta: number;
   CbteFch: string;
   Resultado: "A" | "R";
-  CAE: string;
-  CAEFchVto: string;
+  /** CAE otorgado (FECAESolicitar) */
+  CAE?: string;
+  CAEFchVto?: string;
+  /** CAEA informado (FECAEARegInformativo) */
+  CAEA?: string;
   Observaciones?: { Obs: WsError | WsError[] };
 }
 

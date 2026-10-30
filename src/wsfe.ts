@@ -1,4 +1,4 @@
-import { ENDPOINTS, WSFE_NAMESPACE } from "./constants.js";
+import { ENDPOINTS, WSFE_ERRORES_INTERNOS, WSFE_NAMESPACE } from "./constants.js";
 import { afipSoapCall, toArray } from "./soap-client.js";
 import type { SoapOptions } from "./soap-client.js";
 import { ArcaResultadoIncierto, ArcaSoapError, ArcaWSFEError } from "./errors.js";
@@ -99,6 +99,12 @@ export class WsfeClient {
     } catch (err) {
       if (err instanceof ArcaSoapError && err.uncertain) throw incierto(err);
       throw err;
+    }
+
+    // Un error interno de ARCA no garantiza que no se haya procesado.
+    const errores = toArray(result.Errors?.Err);
+    if (errores.some((e) => WSFE_ERRORES_INTERNOS.includes(Number(e.Code)))) {
+      throw incierto(new ArcaWSFEError(errores.map((e) => ({ code: Number(e.Code), msg: String(e.Msg) }))));
     }
 
     // Errores de negocio: ARCA rechazó el request, no se emitió nada.

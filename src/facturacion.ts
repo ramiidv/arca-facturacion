@@ -1,5 +1,14 @@
-import { IVA_RATES, Concepto, DocTipo, CondicionIva, Moneda, isTipoC } from "./constants.js";
-import { validateFacturarOpts } from "./validation.js";
+import {
+  IVA_RATES,
+  Concepto,
+  DocTipo,
+  CondicionIva,
+  Moneda,
+  isTipoC,
+  WSFE_NUMERO_NO_CORRESPONDE,
+} from "./constants.js";
+import { ArcaWSFEError } from "./errors.js";
+import { fail, validateFacturarOpts, validateItems } from "./validation.js";
 import type {
   LineItem,
   FacturarOpts,
@@ -16,10 +25,17 @@ import type {
 } from "./types.js";
 import { toArray } from "./soap-client.js";
 
-/** Pasa un importe a centavos enteros (evita errores de punto flotante). */
+/**
+ * Pasa un importe a centavos enteros. Desplaza la coma en la representación
+ * decimal para evitar errores de punto flotante (1.005 → 101, no 100).
+ */
 function toCents(n: number): number {
-  return Math.round(n * 100);
+  const s = String(n);
+  return s.includes("e") ? Math.round(n * 100) : Math.round(Number(`${s}e2`));
 }
+
+const optString = (v: unknown): string | undefined =>
+  v === undefined || v === null || v === "" ? undefined : String(v);
 
 function fromCents(c: number): number {
   return c / 100;
@@ -27,11 +43,7 @@ function fromCents(c: number): number {
 
 /** Alícuota en puntos básicos (21% → 2100, 10,5% → 1050) para operar con enteros. */
 function rateBasisPoints(ivaId: number): number {
-  const rate = IVA_RATES[ivaId as keyof typeof IVA_RATES];
-  if (rate === undefined) {
-    throw new Error(`Tipo de IVA desconocido: ${ivaId}`);
-  }
-  return Math.round(rate * 100);
+  return Math.round(IVA_RATES[ivaId as keyof typeof IVA_RATES] * 100);
 }
 
 /**
@@ -90,11 +102,13 @@ function itemAmountCents(item: LineItem): { neto: number; total: number } {
  * @param items - Line items
  * @param opts - Opciones: tributos, si es tipo C, y descuento global
  * @returns Importes calculados e array de alícuotas IVA
+ * @throws ArcaValidationError si un item es inválido o el descuento supera el total
  */
 export function calcularTotales(
   items: LineItem[],
   opts?: { tributos?: { Importe: number }[]; tipoC?: boolean; descuentoGlobal?: number }
 ): { importes: Importes; iva: AlicuotaIva[] } {
+  validateItems(items, opts?.descuentoGlobal);
   const tipoC = opts?.tipoC ?? false;
   const buckets = new Map<BucketKey, Bucket>();
 
@@ -134,6 +148,14 @@ export function calcularTotales(
   const basesPrevias = list.map((b) => b.netoCents + baseDesdeTotal(b.totalCents, b.rateBp));
 
   const descuentoCents = toCents(opts?.descuentoGlobal ?? 0);
+  const totalItemsCents = finals.reduce((a, b) => a + b, 0);
+  if (descuentoCents > totalItemsCents) {
+    fail(
+      "descuentoGlobal",
+      `descuentoGlobal (${fromCents(descuentoCents)}) no puede superar el total de los items (${fromCents(totalItemsCents)})`,
+      opts?.descuentoGlobal
+    );
+  }
   const shares = prorratear(descuentoCents, finals, basesPrevias);
 
   let impNeto = 0;
@@ -163,9 +185,7 @@ export function calcularTotales(
     } else {
       impNeto += base;
       impIVA += iva;
-      if (base !== 0 || iva !== 0 || descuentoCents === 0) {
-        ivaArray.push({ Id: b.key, BaseImp: fromCents(base), Importe: fromCents(iva) });
-      }
+      ivaArray.push({ Id: b.key, BaseImp: fromCents(base), Importe: fromCents(iva) });
     }
   });
 
@@ -196,26 +216,31 @@ function baseDesdeTotal(totalCents: number, rateBp: number): number {
 }
 
 /**
- * Reparte `monto` centavos en proporción a `pesos`. El resto de redondeo va al
- * índice de mayor `base`. Usa BigInt para no perder precisión con montos grandes.
+ * Reparte `monto` centavos (<= suma de `pesos`) en proporción a `pesos`. Los
+ * centavos que sobran del redondeo se asignan de a uno, empezando por el
+ * índice de mayor `base` y sin que ninguna parte supere su peso (ningún grupo
+ * queda negativo). Usa BigInt para no perder precisión con montos grandes.
  */
 function prorratear(monto: number, pesos: number[], bases: number[]): number[] {
   const shares = pesos.map(() => 0);
-  if (monto === 0) return shares;
   const totalPesos = pesos.reduce((a, b) => a + b, 0);
-  if (totalPesos <= 0) return shares;
+  if (monto === 0 || totalPesos <= 0) return shares;
 
-  let asignado = 0;
   pesos.forEach((p, i) => {
     shares[i] = Number((BigInt(monto) * BigInt(p)) / BigInt(totalPesos));
-    asignado += shares[i];
   });
 
-  let mayor = 0;
-  bases.forEach((b, i) => {
-    if (b > bases[mayor]) mayor = i;
-  });
-  shares[mayor] += monto - asignado;
+  let resto = monto - shares.reduce((a, b) => a + b, 0);
+  const porBase = bases.map((_, i) => i).sort((a, b) => bases[b] - bases[a]);
+  while (resto > 0) {
+    for (const i of porBase) {
+      if (resto === 0) break;
+      if (shares[i] < pesos[i]) {
+        shares[i]++;
+        resto--;
+      }
+    }
+  }
   return shares;
 }
 
@@ -383,17 +408,14 @@ export function parseFacturaResult(
   result: FECAESolicitarResult,
   importes: Importes
 ): FacturaResult {
-  const detArr = Array.isArray(result.FeDetResp.FECAEDetResponse)
-    ? result.FeDetResp.FECAEDetResponse
-    : [result.FeDetResp.FECAEDetResponse];
-
-  const det = detArr[0];
+  const det = toArray(result.FeDetResp.FECAEDetResponse)[0];
   const aprobada = det.Resultado === "A";
 
   return {
     aprobada,
-    cae: aprobada ? String(det.CAE) : undefined,
-    caeVencimiento: aprobada ? String(det.CAEFchVto) : undefined,
+    // En FECAEARegInformativo el código es el CAEA y no hay vencimiento por comprobante.
+    cae: aprobada ? optString(det.CAE ?? det.CAEA) : undefined,
+    caeVencimiento: aprobada ? optString(det.CAEFchVto) : undefined,
     cbteNro: Number(det.CbteDesde),
     ptoVta: Number(result.FeCabResp.PtoVta),
     cbteTipo: Number(result.FeCabResp.CbteTipo),
@@ -412,8 +434,8 @@ export function facturaResultDesdeConsulta(consulta: FECompConsultarResult): Fac
   const aprobada = r.Resultado === undefined || r.Resultado === "A";
   return {
     aprobada,
-    cae: aprobada ? String(r.CodAutorizacion) : undefined,
-    caeVencimiento: aprobada ? String(r.FchVto) : undefined,
+    cae: aprobada ? optString(r.CodAutorizacion) : undefined,
+    caeVencimiento: aprobada ? optString(r.FchVto) : undefined,
     cbteNro: Number(r.CbteDesde),
     ptoVta: Number(r.PtoVta),
     cbteTipo: Number(r.CbteTipo),
@@ -428,4 +450,25 @@ export function facturaResultDesdeConsulta(consulta: FECompConsultarResult): Fac
     observaciones: parseObservaciones(r.Observaciones),
     raw: consulta,
   };
+}
+
+/**
+ * `true` si el resultado de una emisión indica que el número ya fue usado
+ * (validación 10016): ARCA rechazó este envío, pero un intento anterior con el
+ * mismo número pudo haberse autorizado. Resolverlo con `recuperarComprobante`
+ * antes de marcar el comprobante como rechazado.
+ *
+ * Acepta un `FacturaResult` (rechazo con observaciones) o el error lanzado.
+ */
+export function requiereRecuperacion(resultadoOError: FacturaResult | unknown): boolean {
+  if (resultadoOError instanceof ArcaWSFEError) {
+    return resultadoOError.tieneCodigo(WSFE_NUMERO_NO_CORRESPONDE);
+  }
+  const r = resultadoOError as Partial<FacturaResult> | null;
+  return (
+    !!r &&
+    r.aprobada === false &&
+    Array.isArray(r.observaciones) &&
+    r.observaciones.some((o) => Number(o.code) === WSFE_NUMERO_NO_CORRESPONDE)
+  );
 }

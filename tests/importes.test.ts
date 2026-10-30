@@ -186,3 +186,48 @@ describe("armarComprobante", () => {
     expect(() => armar([{ total: 1, iva: IvaTipo.IVA_21 }], { cbteNro: 0 })).toThrow(ArcaValidationError);
   });
 });
+
+describe("regresiones", () => {
+  it("el resto del prorrateo nunca deja un grupo negativo", () => {
+    const { importes, iva } = calcularTotales(
+      [
+        { total: 0.01, iva: IvaTipo.IVA_21 },
+        { total: 0.01, iva: IvaTipo.IVA_10_5 },
+        { total: 0.01, exento: true },
+      ],
+      { descuentoGlobal: 0.02 }
+    );
+    expect(iva.every((a) => a.BaseImp >= 0 && a.Importe >= 0)).toBe(true);
+    expect(importes.exento).toBeGreaterThanOrEqual(0);
+    expect(importes.total).toBe(0.01);
+  });
+
+  it("un descuento igual al total deja todo en cero", () => {
+    const { importes } = calcularTotales(
+      [
+        { neto: 33.33, iva: IvaTipo.IVA_21 },
+        { total: 10, exento: true },
+      ],
+      { descuentoGlobal: 50.33 }
+    );
+    expect(importes.total).toBe(0);
+    expect(importes.neto).toBe(0);
+    expect(importes.iva).toBe(0);
+  });
+
+  it("el descuento se valida al centavo contra el total calculado", () => {
+    // 33.33 + IVA 21% = 40.33 (IVA redondeado a 7.00)
+    expect(() => calcularTotales([{ neto: 33.33, iva: IvaTipo.IVA_21 }], { descuentoGlobal: 40.34 })).toThrow(
+      /no puede superar el total de los items \(40.33\)/
+    );
+  });
+
+  it("los importes con 3 decimales se redondean bien (1.005 → 1.01)", () => {
+    expect(calcularTotales([{ total: 1.005, exento: true }]).importes.total).toBe(1.01);
+  });
+
+  it("calcularTotales standalone valida los items", () => {
+    expect(() => calcularTotales([{ total: -1, iva: IvaTipo.IVA_21 }])).toThrow(ArcaValidationError);
+    expect(() => calcularTotales([{ neto: 100, iva: 999 }])).toThrow(ArcaValidationError);
+  });
+});
