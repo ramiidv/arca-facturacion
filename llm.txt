@@ -1,4 +1,4 @@
-# @ramiidv/arca-sdk
+# @ramiidv/arca-facturacion
 
 > TypeScript SDK for ARCA (formerly AFIP) electronic invoicing in Argentina.
 > Wraps WSFEv1, WSFEX, and WSAA SOAP web services.
@@ -11,23 +11,25 @@
 - Auto-calculates IVA, totals, and comprobante numbers
 - Queries ARCA parameters (document types, IVA rates, currencies, exchange rates, etc.)
 - Export invoices via WSFEX (Factura de Exportación)
-- Retry with exponential backoff on transient errors
+- Safe emission: emissions are never retried; uncertain outcomes throw `ArcaResultadoIncierto` and are resolved with `recuperarComprobante`
+- Retry with exponential backoff on transient errors (queries only)
+- Persistent WSAA access tickets (`ticketStorage`) and clock-skew correction
 - Event system for logging/debugging (auth, requests, retries)
 - QR code URL generation for printed invoices
 
 ## Install
 
 ```bash
-npm install @ramiidv/arca-sdk
+npm install @ramiidv/arca-facturacion
 ```
 
-Requires Node.js >= 18. Uses native `fetch` (no axios/node-fetch dependency).
+Requires Node.js >= 18. Uses native `fetch` (no axios/node-fetch dependency). Published as dual ESM + CommonJS (works with `import` and `require`, including TypeScript `"module": "CommonJS"`).
 
 ## Quick start
 
 ```typescript
 import fs from "fs";
-import { Arca, CbteTipo, IvaTipo, DocTipo, Moneda } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo, IvaTipo, DocTipo, Moneda } from "@ramiidv/arca-facturacion";
 
 const arca = new Arca({
   cuit: 20123456789,
@@ -69,10 +71,55 @@ new Arca({
   production?: boolean,       // Default: false (uses homologación/testing endpoints)
   tokenTTLMinutes?: number,   // Default: 720 (12 hours)
   requestTimeoutMs?: number,  // Default: 30000 (30 seconds). Uses AbortController.
-  retries?: number,           // Default: 1. Retries on transient errors (timeout, 5xx).
-  retryDelayMs?: number,      // Default: 1000. Exponential backoff: delay * 2^attempt.
+  retries?: number,           // Default: 1. Queries only (timeout, network, 5xx). Emissions are NEVER retried.
+  retryDelayMs?: number,      // Default: 1000. Exponential backoff: delay * 2^(attempt-1).
   onEvent?: (event: ArcaEvent) => void, // Callback for all SDK events
+  paramCacheTTLMs?: number,   // Default: 86400000 (24h). 0 disables parameter cache.
+  ticketStorage?: TicketStorage, // Persist WSAA tickets across restarts. Strongly recommended.
+  clockOffsetMs?: number,     // ARCA clock - local clock (ms). Default: 0. Also used for default invoice date.
+  autoClockSkew?: boolean,    // Default: true. Auto-adjust offset if WSAA rejects login due to clock.
+  signal?: AbortSignal,       // Global cancellation for every call of this instance.
+  wsaa?: WsaaClient,          // Shared WSAA client (e.g. with ArcaPadron). `arca.wsaa` exposes this instance's client.
 })
+```
+
+Without `ticketStorage`, a restart loses the access ticket and WSAA rejects new logins ("ya posee un TA válido") until the old one expires (up to 12h) → `ArcaTicketVigenteError`. Use `FileTicketStorage(dir)` or implement `TicketStorage { get(key), set(key, ticket), delete?(key) }` over your DB. `AccessTicket` is plain JSON (ISO dates).
+
+Every public method accepts an optional last argument `{ signal?: AbortSignal }`, combined with the config `signal`.
+
+## Safe emission (no ambiguous states)
+
+| Outcome | SDK result | Issued? |
+| --- | --- | --- |
+| Authorized | `FacturaResult` with `aprobada: true`, `cae` | yes |
+| Rejected | `ArcaWSFEError` (Errors) or `aprobada: false` (Resultado "R") | no |
+| Unknown (timeout, dropped connection, HTTP 5xx, unreadable response, abort after sending) | `ArcaResultadoIncierto` | must be resolved |
+
+- Emissions (FECAESolicitar, FECAEARegInformativo, FECAEASinMovimientoInformar, FEXAuthorize) are never retried.
+- No connectivity (DNS failure, connection refused) is NOT uncertain: `ArcaSoapError` with `uncertain: false` (nothing was sent).
+- `ArcaResultadoIncierto` has `intento: IntentoComprobante` (`{ ptoVta, cbteTipo, cbteNro, importeTotal, docTipo, docNro, fecha }`), `intentos` (all invoices of the request) and `operacion`.
+- `arca.recuperarComprobante(intento)` returns:
+  - `{ estado: "no_emitido" }` if last authorized < cbteNro → retrying with the SAME cbteNro is safe.
+  - `{ estado: "autorizado", resultado: FacturaResult }` if FECompConsultar matches ImpTotal (±0.01), DocTipo, DocNro, CbteFch.
+  - `{ estado: "conflicto", encontrado: FECompConsultarResult }` otherwise.
+- Pass `cbteNro` explicitly to make retries idempotent: ARCA rejects a number already used (error 10016), so a duplicate can never be issued. Without `cbteNro` the SDK uses last + 1 with no lock: serialize emissions per (ptoVta, cbteTipo).
+- `arca.armarComprobante(opts & { cbteNro })` (or the pure `armarComprobante` function) returns `{ request, importes, intento }` without network: persist `intento` before sending so a crashed process can recover.
+- `ArcaWSFEError.tieneCodigo(10016)`: "number does not match next to authorize" usually means a previous attempt was authorized → call `recuperarComprobante`.
+
+```typescript
+const opts = { ptoVta: 1, cbteTipo: CbteTipo.FACTURA_B, cbteNro: 151, items: [{ total: 1210, iva: IvaTipo.IVA_21 }] };
+const { intento } = arca.armarComprobante(opts);
+await db.save({ estado: "enviando", opts, intento });
+try {
+  const res = await arca.facturar(opts);
+} catch (e) {
+  if (e instanceof ArcaResultadoIncierto) {
+    const r = await arca.recuperarComprobante(e.intento);
+    if (r.estado === "autorizado") { /* r.resultado.cae */ }
+    else if (r.estado === "no_emitido") { await arca.facturar(opts); /* same cbteNro */ }
+    else { /* conflicto: manual review, r.encontrado */ }
+  }
+}
 ```
 
 ## Simplified API — facturar()
@@ -83,11 +130,14 @@ Automatically: gets next comprobante number, calculates all totals from line ite
 interface FacturarOpts {
   ptoVta: number;                          // Punto de venta
   cbteTipo: number;                        // CbteTipo enum
+  cbteNro?: number;                        // Explicit number: skips ultimoComprobante, makes retries safe
   items: LineItem[];                       // Line items (see below)
+  descuentoGlobal?: number;                // Final amount (IVA included), prorated across aliquots, exento and no gravado
+  cbtesAsoc?: ComprobanteRef[];            // Associated comprobantes
   concepto?: number;                       // Default: PRODUCTOS. Auto-detects SERVICIOS if `servicio` provided
   docTipo?: number;                        // Default: DocTipo.CONSUMIDOR_FINAL (99)
   docNro?: number;                         // Default: 0
-  condicionIva?: number;                   // CondicionIva enum. MANDATORY since April 2026. Auto-set for CF.
+  condicionIva?: number;                   // CondicionIva enum. REQUIRED if docTipo != 99 (not inferred). Defaults to 5 for docTipo 99.
   canMisMonExt?: string;                   // "S"/"N". Required for foreign currency (RG5616).
   fecha?: Date | string;                   // Default: today (Argentina timezone). String = "YYYYMMDD"
   servicio?: { desde, hasta, vtoPago };    // Required for services. Accepts Date or "YYYYMMDD"
@@ -97,20 +147,24 @@ interface FacturarOpts {
   opcionales?: Opcional[];                 // E.g., CBU for FCE: [{ Id: "2101", Valor: "..." }]
 }
 
-interface LineItem {
-  neto: number;        // Net amount (without IVA)
-  iva?: number;        // IvaTipo enum. If set, item is "gravado" and IVA is calculated
-  exento?: boolean;    // If true, amount goes to ImpOpEx (exempt)
-  // If neither iva nor exento: amount goes to ImpTotConc (no gravado)
-}
+// Exactly one of `neto` (without IVA) or `total` (final price, IVA included).
+type LineItem =
+  | { neto: number; iva?: number; exento?: boolean }
+  | { total: number; iva?: number; exento?: boolean };
+// iva: IvaTipo enum. If set, item is "gravado".
+// exento: true → ImpOpEx. Neither → ImpTotConc (no gravado). For exento/no gravado, total = neto.
 ```
+
+`CondicionIVAReceptorId` is mandatory per RG 5616: ARCA rejects invoices without it from 01/12/2026 (WSFEv1 manual v4.8). The SDK requires `condicionIva` when the receiver is identified (a CUIT can be RI, monotributo or exento); use `condicionIvaDesdePadron` from `@ramiidv/arca-padron`.
 
 **IVA calculation rules:**
 - Items with `iva` set → added to ImpNeto. IVA calculated using IVA_RATES and added to ImpIVA. Grouped by aliquot in the Iva array.
 - Items with `exento: true` → added to ImpOpEx.
 - Items with neither → added to ImpTotConc (no gravado).
 - ImpTotal = ImpNeto + ImpIVA + ImpOpEx + ImpTotConc + ImpTrib.
-- All amounts rounded to 2 decimal places.
+- `total` items: base = round(total / (1 + rate)), IVA = total - base (exact).
+- `descuentoGlobal` is prorated by group final amount; the rounding remainder goes to the group with the largest base. Tributos are not discounted.
+- Computed in integer cents: sum(BaseImp + Importe) + ImpOpEx + ImpTotConc + ImpTrib == ImpTotal exactly.
 - For CbteTipo C (monotributista): IVA is NOT discriminated. All items go to ImpNeto, ImpIVA = 0.
 
 **Return type:**
@@ -130,9 +184,10 @@ interface FacturaResult {
     exento: number;
     noGravado: number;
     tributos: number;
+    descuento?: number;
   };
   observaciones: { code: number; msg: string }[];
-  raw: FECAESolicitarResult;  // Full AFIP response
+  raw: FECAESolicitarResult | FECompConsultarResult;  // FECompConsultar when obtained via recuperarComprobante
 }
 ```
 
@@ -230,40 +285,60 @@ await arca.getCantMaxRegistros();
 await arca.getCondicionesIva();          // valid CondicionIva values from ARCA
 
 // Utility
-arca.clearAuthCache();                   // invalidate cached auth tokens
+await arca.clearAuthCache();             // invalidate auth tokens (memory + ticketStorage)
+
+// Pure helpers (no network), also exported as functions
+armarComprobante(opts & { cbteNro });    // { request, importes, intento }
+calcularTotales(items, { tipoC?, tributos?, descuentoGlobal? });
+resolverCbteTipo(emisor: CondicionIva, receptor: CondicionIva, clase?: "factura" | "nota_credito" | "nota_debito");
+// RI → RI/monotributo: A; RI → CF/exento/no categorizado/exterior/IVA liberado/no alcanzado: B; monotributo or exento issuer: C
 ```
 
 ## Input validation
 
-The SDK validates inputs before sending to ARCA, throwing `ArcaError` with clear messages:
-- `facturar()`: ptoVta, cbteTipo, items (neto >= 0, no iva+exento), servicio dates, cotizacion for foreign currency. **condicionIva required for non-consumidor-final** (mandatory since April 2026).
+The SDK validates inputs before sending to ARCA, throwing `ArcaValidationError` (extends `ArcaError`, with `field` and `details`):
+- `facturar()` / `notaCredito()` / `notaDebito()` / `armarComprobante()`: ptoVta, cbteTipo, cbteNro (integer >= 1), items (exactly one of neto/total, >= 0, no iva+exento, known aliquot), descuentoGlobal (0..total), fecha (YYYYMMDD), servicio dates, cotizacion for foreign currency. **condicionIva required when docTipo != 99.**
 - `facturarExpo()`: ptoVta, cbteTipo, tipoExpo, cliente (nombre, domicilio, cuitPais), moneda, cotizacion, formaPago, pais, items (descripcion, cantidad, precioUnitario).
-- `crearFactura()`: PtoVta, CbteTipo, invoices not empty, each invoice has ImpTotal, CbteDesde/Hasta, CbteFch, MonId, MonCotiz.
+- `crearFactura()`: PtoVta, CbteTipo, invoices not empty, each invoice has ImpTotal, CbteDesde/Hasta, CbteFch, MonId, MonCotiz, and CondicionIVAReceptorId when DocTipo != 99.
 
 ## Error handling
 
 ```typescript
-import { ArcaAuthError, ArcaWSFEError, ArcaSoapError } from "@ramiidv/arca-sdk";
+import {
+  ArcaAuthError, ArcaTicketVigenteError, ArcaWSFEError, ArcaSoapError,
+  ArcaResultadoIncierto, ArcaValidationError,
+} from "@ramiidv/arca-facturacion";
 
 try {
   await arca.facturar({ ... });
 } catch (e) {
-  if (e instanceof ArcaAuthError) {
-    // WSAA login failed (bad cert, expired, etc.)
-    arca.clearAuthCache();
+  if (e instanceof ArcaResultadoIncierto) {
+    // Unknown outcome of an emission: resolve with arca.recuperarComprobante(e.intento)
   }
   if (e instanceof ArcaWSFEError) {
-    // AFIP business error with codes
+    // ARCA business error: NOT issued
     e.errors; // { code: number, msg: string }[]
+    e.tieneCodigo(10016);
+  }
+  if (e instanceof ArcaValidationError) {
+    e.field; e.details; // nothing was sent
+  }
+  if (e instanceof ArcaTicketVigenteError) {
+    // WSAA already issued a valid TA that is not in memory/storage: wait until it expires
+  }
+  if (e instanceof ArcaAuthError) {
+    // WSAA login failed (bad cert, expired, etc.)
   }
   if (e instanceof ArcaSoapError) {
-    // HTTP/SOAP transport error (timeout, 500, SOAP fault)
-    e.statusCode; // number | undefined
+    // HTTP/SOAP transport error in a query, or an emission certainly not sent (uncertain: false)
+    e.statusCode; e.faultString; e.uncertain; e.aborted;
   }
 }
 ```
 
-All error classes extend `ArcaError` which extends `Error`.
+All error classes extend `ArcaError` which extends `Error`, and have a stable `code`
+("ARCA_RESULTADO_INCIERTO", "ARCA_WSFE_ERROR", "ARCA_VALIDATION_ERROR", "ARCA_TICKET_VIGENTE", "ARCA_AUTH_ERROR", "ARCA_SOAP_ERROR").
+`instanceof` works across duplicated copies of the package (ESM + CJS in the same process).
 
 ## Enums reference
 
@@ -287,7 +362,7 @@ DocTipo.DNI               // 96
 DocTipo.CONSUMIDOR_FINAL  // 99
 // ... CUIL (86), CDI (87), Pasaporte (94), etc.
 
-// IVA condition of receiver (MANDATORY since April 2026)
+// IVA condition of receiver (mandatory per RG 5616; ARCA rejects without it from 01/12/2026)
 CondicionIva.RESPONSABLE_INSCRIPTO  // 1
 CondicionIva.EXENTO                 // 4  (IVA Sujeto Exento)
 CondicionIva.CONSUMIDOR_FINAL      // 5  (auto-set when docTipo=99)
@@ -397,12 +472,12 @@ Event types (discriminated union `ArcaEvent`):
 - `auth:cache-hit` — cached token reused. Fields: `service`
 - `request:start` — SOAP call starting. Fields: `method`, `endpoint`
 - `request:end` — SOAP call completed. Fields: `method`, `durationMs`
-- `request:retry` — retrying after error. Fields: `method`, `attempt`, `delayMs`, `error`
+- `request:retry` — retrying after error (queries only). Fields: `method`, `attempt`, `error`
 - `request:error` — request failed. Fields: `method`, `error`
 
 ## Retry
 
-Enabled by default (`retries: 1`). Only retries on transient errors (timeout, 5xx, network). Does NOT retry on 4xx or business errors. Exponential backoff: `retryDelayMs * 2^attempt`.
+Enabled by default (`retries: 1`) for queries only (incl. WSAA login and padrón). Retries on timeout, network errors and HTTP 5xx without SOAP Fault. Does NOT retry SOAP Faults, 4xx, business errors, or any emission. Exponential backoff: `retryDelayMs * 2^(attempt-1)`.
 
 ## QR Code URL
 
@@ -514,7 +589,7 @@ const existing = await arca.consultarCAEA("202604", 1);
 
 ## Padrón (taxpayer registry)
 
-Look up taxpayer data by CUIT. Two service levels:
+**Deprecated: use `@ramiidv/arca-padron`** (constancia de inscripción, A4, A10, A13, A100, `condicionIvaDesdePadron`). Kept for compatibility.
 
 ```typescript
 // Basic lookup (A13) — works with standard cert
@@ -523,12 +598,12 @@ persona.cuit;         // 30712345678
 persona.nombre;       // "EMPRESA SA"
 persona.tipoPersona;  // "JURIDICA"
 persona.estadoClave;  // "ACTIVO"
-persona.impuestos;    // [{ id: 30, descripcion: "IVA", estado: "AC" }]
 persona.raw;          // full parsed AFIP response
 
-// Detailed lookup (A5) — requires additional cert authorization
+// Constancia de inscripción (former A5) — service ws_sr_constancia_inscripcion, method getPersona_v2
 const detalle = await arca.consultarCuitDetalle(20123456789);
 detalle.domicilioFiscal; // { direccion, localidad, codPostal }
+detalle.impuestos;       // [{ id: 30, descripcion: "IVA", estado: "AC" }]
 ```
 
 Returns `Contribuyente`: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `domicilioFiscal?`, `impuestos?`, `raw`.
@@ -546,4 +621,4 @@ Returns `Contribuyente`: `cuit`, `nombre`, `tipoPersona`, `estadoClave`, `domici
 - **Tipo C**: Invoices issued by monotributistas (simplified tax regime). No IVA discrimination.
 - **WSFEX**: ARCA's web service for export invoices. Separate from WSFEv1, different schema.
 - **CAEA**: Código de Autorización Electrónico Anticipado. Pre-authorized code for offline invoicing. Must be requested before the period starts.
-- **Padrón A13/A5**: ARCA's taxpayer registry web services. A13 = basic info (name, status, taxes). A5 = detailed (includes address, activities). Requires separate WSAA authorization.
+- **Padrón A13 / Constancia de inscripción**: ARCA's taxpayer registry web services. A13 = basic info (name, status, address). Constancia de inscripción (`ws_sr_constancia_inscripcion`, former A5, which is deprecated) = address and registered taxes. Each requires separate WSAA authorization.

@@ -6,7 +6,7 @@
  */
 
 import fs from "fs";
-import { Arca, CbteTipo } from "@ramiidv/arca-sdk";
+import { Arca, CbteTipo } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({
