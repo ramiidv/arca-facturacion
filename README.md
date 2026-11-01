@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **Repositorio archivado.** El desarrollo de `@ramiidv/arca-facturacion` sigue en el monorepo
+> [ramiidv/arca-sdks](https://github.com/ramiidv/arca-sdks/tree/main/packages/facturacion).
+> Desde la versión 5.0.0, el paquete se publica desde ahí. Los issues y PRs van en ese repo.
+
 # @ramiidv/arca-facturacion
 
 [![CI](https://github.com/ramiidv/arca-facturacion/actions/workflows/ci.yml/badge.svg)](https://github.com/ramiidv/arca-facturacion/actions/workflows/ci.yml)
