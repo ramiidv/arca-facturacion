@@ -1,3 +1,4 @@
+import { ensureArray, formatDate, normalizeCuit } from "@ramiidv/arca-common";
 import {
   IVA_RATES,
   Concepto,
@@ -22,8 +23,9 @@ import type {
   ComprobanteArmado,
   IntentoComprobante,
   ComprobanteAsociado,
+  MensajeArca,
+  Tributo,
 } from "./types.js";
-import { toArray } from "./soap-client.js";
 
 /**
  * Pasa un importe a centavos enteros. Desplaza la coma en la representación
@@ -41,25 +43,62 @@ function fromCents(c: number): number {
   return c / 100;
 }
 
+/** Redondea un importe a 2 decimales (xs:double de WSFEv1, 2 decimales según el manual). */
+export function redondear2(n: number): number {
+  return fromCents(toCents(n));
+}
+
 /** Alícuota en puntos básicos (21% → 2100, 10,5% → 1050) para operar con enteros. */
 function rateBasisPoints(ivaId: number): number {
   return Math.round(IVA_RATES[ivaId as keyof typeof IVA_RATES] * 100);
 }
 
 /**
- * Convierte un Date o string YYYYMMDD a string YYYYMMDD.
- * Si recibe un Date, lo formatea en timezone Argentina.
+ * Convierte un Date o string YYYYMMDD / YYYY-MM-DD a string YYYYMMDD (un Date
+ * se toma en la zona horaria de Argentina).
+ *
+ * @deprecated Usar `formatDate` de `@ramiidv/arca-common` (es la misma
+ * función): valida que la fecha exista y lanza `ArcaValidationError` si no.
  */
 export function toDateString(d: Date | string): string {
-  if (typeof d === "string") return d;
-  return d
-    .toLocaleDateString("en-CA", {
-      timeZone: "America/Argentina/Buenos_Aires",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    })
-    .replace(/-/g, "");
+  return formatDate(d);
+}
+
+let fechaHoraFormatter: Intl.DateTimeFormat | undefined;
+
+/**
+ * Formatea una fecha y hora como `yyyymmddhhmmss` (hora de Argentina), el
+ * formato de `CbteFchHsGen`. Acepta un `Date` o un string de 14 dígitos (se
+ * valida que la fecha y la hora existan).
+ *
+ * @throws ArcaValidationError si el valor no es válido.
+ */
+export function formatFechaHora(value: Date | string, field = "fechaHora"): string {
+  if (typeof value === "string") {
+    const m = /^(\d{8})(\d{2})(\d{2})(\d{2})$/.exec(value);
+    if (!m) fail(field, `${field} debe tener formato yyyymmddhhmmss`, value);
+    try {
+      formatDate(m[1]);
+    } catch {
+      fail(field, `${field}: la fecha no existe`, value);
+    }
+    if (Number(m[2]) > 23 || Number(m[3]) > 59 || Number(m[4]) > 59) fail(field, `${field}: la hora no es válida`, value);
+    return value;
+  }
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) fail(field, `${field} no es una fecha válida`, value);
+  fechaHoraFormatter ??= new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = fechaHoraFormatter.formatToParts(value);
+  const part = (t: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${part("year")}${part("month")}${part("day")}${part("hour")}${part("minute")}${part("second")}`;
 }
 
 type BucketKey = number | "exento" | "noGravado" | "tipoC";
@@ -267,7 +306,10 @@ export function buildInvoiceDetail(
     descuentoGlobal: opts.descuentoGlobal,
   });
 
-  const fecha = toDateString(opts.fecha ?? ahora);
+  const fecha = formatDate(opts.fecha ?? ahora);
+  const moneda = opts.moneda ?? Moneda.PESOS;
+  // MonCotiz: 1 para pesos; en moneda extranjera puede omitirse si CanMisMonExt = "S" (validación 10038).
+  const cotizacion = opts.cotizacion ?? (moneda === Moneda.PESOS ? 1 : undefined);
 
   const detail: InvoiceDetail = {
     Concepto: concepto,
@@ -282,9 +324,9 @@ export function buildInvoiceDetail(
     ImpOpEx: importes.exento,
     ImpTrib: importes.tributos,
     ImpIVA: importes.iva,
-    MonId: opts.moneda ?? Moneda.PESOS,
-    MonCotiz: opts.cotizacion ?? 1,
+    MonId: moneda,
   };
+  if (cotizacion !== undefined) detail.MonCotiz = cotizacion;
 
   // CondicionIVAReceptorId: obligatorio según RG 5616 (ARCA rechaza sin él desde el
   // 01/12/2026). Solo se completa por defecto para consumidor final sin identificar.
@@ -305,13 +347,15 @@ export function buildInvoiceDetail(
   }
 
   if (opts.servicio) {
-    detail.FchServDesde = toDateString(opts.servicio.desde);
-    detail.FchServHasta = toDateString(opts.servicio.hasta);
-    detail.FchVtoPago = toDateString(opts.servicio.vtoPago);
+    detail.FchServDesde = formatDate(opts.servicio.desde);
+    detail.FchServHasta = formatDate(opts.servicio.hasta);
+    detail.FchVtoPago = formatDate(opts.servicio.vtoPago);
   }
 
   if (opts.tributos && opts.tributos.length > 0) {
-    detail.Tributos = opts.tributos;
+    detail.Tributos = opts.tributos.map(
+      (t): Tributo => ({ ...t, BaseImp: redondear2(t.BaseImp), Importe: redondear2(t.Importe) })
+    );
   }
 
   if (opts.cbtesAsoc && opts.cbtesAsoc.length > 0) {
@@ -320,14 +364,22 @@ export function buildInvoiceDetail(
         Tipo: c.tipo,
         PtoVta: c.ptoVta,
         Nro: c.nro,
-        ...(c.cuit !== undefined && { Cuit: c.cuit }),
-        ...(c.fecha !== undefined && { CbteFch: toDateString(c.fecha) }),
+        ...(c.cuit !== undefined && { Cuit: normalizeCuit(c.cuit) }),
+        ...(c.fecha !== undefined && { CbteFch: formatDate(c.fecha) }),
       })
     );
   }
 
   if (opts.opcionales && opts.opcionales.length > 0) {
     detail.Opcionales = opts.opcionales;
+  }
+
+  if (opts.periodoAsoc) {
+    detail.PeriodoAsoc = { FchDesde: formatDate(opts.periodoAsoc.desde), FchHasta: formatDate(opts.periodoAsoc.hasta) };
+  }
+
+  if (opts.actividades && opts.actividades.length > 0) {
+    detail.Actividades = opts.actividades.map((id) => ({ Id: id }));
   }
 
   return { detail, importes };
@@ -397,18 +449,29 @@ export function coincideConIntento(
   );
 }
 
-function parseObservaciones(obs?: { Obs: WsError | WsError[] }): { code: number; msg: string }[] {
-  return toArray(obs?.Obs).map((o) => ({ code: Number(o.Code), msg: String(o.Msg) }));
+/** Normaliza los `Events.Evt` de una respuesta de WSFEv1. */
+export function eventosWsfe(result: { Events?: unknown } | undefined): MensajeArca[] {
+  const events = (result as { Events?: { Evt?: WsError | WsError[] } } | undefined)?.Events;
+  return ensureArray(events?.Evt).map((e) => ({ code: Number(e.Code), msg: String(e.Msg ?? "") }));
+}
+
+function parseObservaciones(obs?: { Obs: WsError | WsError[] }): MensajeArca[] {
+  return ensureArray(obs?.Obs).map((o) => ({ code: Number(o.Code), msg: String(o.Msg ?? "") }));
 }
 
 /**
- * Parsea el resultado crudo de FECAESolicitar a un FacturaResult limpio.
+ * Parsea el resultado crudo de FECAESolicitar (o FECAEARegInformativo adaptado)
+ * a un FacturaResult limpio.
+ *
+ * @param enviado - Moneda y cotización enviadas (no vienen en la respuesta), para el QR.
  */
 export function parseFacturaResult(
   result: FECAESolicitarResult,
-  importes: Importes
+  importes: Importes,
+  enviado?: { moneda?: string; cotizacion?: number; tipoCodAut?: "E" | "A" }
 ): FacturaResult {
-  const det = toArray(result.FeDetResp.FECAEDetResponse)[0];
+  const det = ensureArray(result.FeDetResp.FECAEDetResponse)[0];
+  if (!det) throw new TypeError("Respuesta sin FECAEDetResponse");
   const aprobada = det.Resultado === "A";
 
   return {
@@ -421,6 +484,13 @@ export function parseFacturaResult(
     cbteTipo: Number(result.FeCabResp.CbteTipo),
     importes,
     observaciones: parseObservaciones(det.Observaciones),
+    eventos: eventosWsfe(result),
+    fecha: optString(det.CbteFch),
+    docTipo: det.DocTipo === undefined ? undefined : Number(det.DocTipo),
+    docNro: det.DocNro === undefined ? undefined : Number(det.DocNro),
+    moneda: enviado?.moneda,
+    cotizacion: enviado?.cotizacion,
+    tipoCodAut: enviado?.tipoCodAut ?? (det.CAEA !== undefined ? "A" : "E"),
     raw: result,
   };
 }
@@ -448,27 +518,57 @@ export function facturaResultDesdeConsulta(consulta: FECompConsultarResult): Fac
       tributos: Number(r.ImpTrib),
     },
     observaciones: parseObservaciones(r.Observaciones),
+    eventos: eventosWsfe(consulta),
+    fecha: optString(r.CbteFch),
+    docTipo: Number(r.DocTipo),
+    docNro: Number(r.DocNro),
+    moneda: optString(r.MonId),
+    cotizacion: r.MonCotiz === undefined || r.MonCotiz === null ? undefined : Number(r.MonCotiz),
+    tipoCodAut: r.EmisionTipo === "CAEA" ? "A" : "E",
     raw: consulta,
   };
 }
 
 /**
+ * `true` si un mensaje 10016 se refiere solo a la fecha (`CbteFch` fuera de
+ * rango) y no al número. El manual usa el mismo código para ambos rechazos;
+ * un mensaje que menciona el número (o es ambiguo, como "El numero o fecha
+ * del comprobante no se corresponde con el proximo a autorizar") se trata
+ * como posible número ya usado.
+ */
+function esRechazoPorFecha(msg: string): boolean {
+  const m = msg.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const mencionaNumero = /\bnumero\b|\bnro\b|cbtedesde|proximo a autorizar/.test(m);
+  const mencionaFecha = /\bfecha\b|cbtefch/.test(m);
+  return mencionaFecha && !mencionaNumero;
+}
+
+function es10016PorNumero(e: { code: number | string; msg: string }): boolean {
+  return Number(e.code) === WSFE_NUMERO_NO_CORRESPONDE && !esRechazoPorFecha(String(e.msg ?? ""));
+}
+
+/**
  * `true` si el resultado de una emisión indica que el número ya fue usado
- * (validación 10016): ARCA rechazó este envío, pero un intento anterior con el
- * mismo número pudo haberse autorizado. Resolverlo con `recuperarComprobante`
- * antes de marcar el comprobante como rechazado.
+ * (validación 10016 por número): ARCA rechazó este envío, pero un intento
+ * anterior con el mismo número pudo haberse autorizado. Resolverlo con
+ * `recuperarComprobante` antes de marcar el comprobante como rechazado.
+ *
+ * El 10016 por fecha (`CbteFch` fuera de rango o anterior al último emitido)
+ * devuelve `false`: no hay nada que recuperar, hay que corregir la fecha. Si
+ * el mensaje es ambiguo (menciona número y fecha) devuelve `true`, porque
+ * `recuperarComprobante` es solo una consulta.
  *
  * Acepta un `FacturaResult` (rechazo con observaciones) o el error lanzado.
  */
 export function requiereRecuperacion(resultadoOError: FacturaResult | unknown): boolean {
   if (resultadoOError instanceof ArcaWSFEError) {
-    return resultadoOError.tieneCodigo(WSFE_NUMERO_NO_CORRESPONDE);
+    return resultadoOError.errors.some(es10016PorNumero);
   }
   const r = resultadoOError as Partial<FacturaResult> | null;
   return (
     !!r &&
     r.aprobada === false &&
     Array.isArray(r.observaciones) &&
-    r.observaciones.some((o) => Number(o.code) === WSFE_NUMERO_NO_CORRESPONDE)
+    r.observaciones.some(es10016PorNumero)
   );
 }

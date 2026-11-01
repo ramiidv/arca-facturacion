@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseXml, buildXml, toArray } from "../src/soap-client.js";
+import { parseXml, buildXml, ensureArray as toArray } from "@ramiidv/arca-common";
 
 describe("parseXml", () => {
   it("parsea XML simple", () => {

@@ -8,8 +8,11 @@ export {
   coincideConIntento,
   facturaResultDesdeConsulta,
   requiereRecuperacion,
+  formatFechaHora,
   toDateString,
 } from "./facturacion.js";
+export { generarUrlQR, urlQRDesdeFactura } from "./qr.js";
+export type { DatosQR } from "./qr.js";
 export { resolverCbteTipo } from "./cbte-tipo.js";
 export type { ClaseComprobante } from "./cbte-tipo.js";
 
@@ -20,8 +23,10 @@ export {
   ArcaTicketVigenteError,
   ArcaWSFEError,
   ArcaSoapError,
+  ArcaServiceError,
   ArcaValidationError,
   ArcaResultadoIncierto,
+  ArcaResultadoInciertoExpo,
 } from "./errors.js";
 export type { OperacionEmision } from "./errors.js";
 
@@ -35,11 +40,14 @@ export type {
   AccessTicket,
   TicketStorage,
   CallOptions,
+  LegacyTlsMode,
   WsfeAuth,
   AlicuotaIva,
   Tributo,
   ComprobanteAsociado,
   Opcional,
+  Comprador,
+  PeriodoAsociado,
   InvoiceDetail,
   InvoiceRequest,
   FeCabResp,
@@ -49,11 +57,16 @@ export type {
   FECompConsultarResult,
   ServerStatus,
   ParamItem,
+  CondicionIvaItem,
   MonedaItem,
   PtoVentaItem,
   CotizacionResult,
+  ActividadItem,
+  PaisItem,
   WsError,
+  MensajeArca,
   QRInput,
+  QROptions,
   // Simplified API
   LineItem,
   LineItemNeto,
@@ -67,6 +80,7 @@ export type {
   IntentoComprobante,
   ResultadoRecuperacion,
   ComprobanteArmado,
+  FacturarCAEAOpts,
   // WSFEX
   WsfexInvoice,
   WsfexItem,
@@ -77,14 +91,20 @@ export type {
   WsfexLastIdResult,
   WsfexGetCmpResult,
   WsfexParamItem,
+  WsfexErr,
+  WsfexEvents,
+  WsfexCotizacion,
+  WsfexPtoVenta,
   FacturarExpoOpts,
   ExpoLineItem,
   FacturaExpoResult,
+  IntentoExpo,
   // CAEA
   CaeaSolicitarResult,
   CaeaRegInfRequest,
   CaeaRegInfResult,
   CaeaSinMovResult,
+  CaeaSinMovItem,
   // Padrón
   Contribuyente,
 } from "./types.js";
@@ -96,7 +116,9 @@ export {
   WSFEX_NAMESPACE,
   WSAA_SERVICES,
   WSFE_ERRORES_INTERNOS,
+  WSFEX_ERRORES_INTERNOS,
   WSFE_NUMERO_NO_CORRESPONDE,
+  QR_URL,
   TipoExpo,
   CbteTipo,
   Concepto,
@@ -113,6 +135,7 @@ export {
 // Low-level clients (for advanced usage)
 export { WsaaClient } from "./wsaa.js";
 export { WsfeClient } from "./wsfe.js";
+export type { WsClientOptions } from "./wsfe.js";
 export { WsfexClient } from "./wsfex.js";
 /** @deprecated Usar `@ramiidv/arca-padron`. */
 export { PadronClient } from "./padron.js";

@@ -19,7 +19,7 @@ import { Arca, CbteTipo, DocTipo, IvaTipo } from "@ramiidv/arca-facturacion";
 async function main() {
   // 1. Inicializar el SDK
   const arca = new Arca({
-    cuit: 20123456789, // Tu CUIT sin guiones
+    cuit: 20123456786, // Tu CUIT sin guiones
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false, // true para producción
@@ -44,20 +44,9 @@ async function main() {
     console.log(`  Comprobante #${result.cbteNro}`);
     console.log(`  Total: $${result.importes.total}`);
 
-    // 5. Generar URL del QR oficial para imprimir en la factura
-    const qrUrl = Arca.generateQRUrl({
-      fecha: result.caeVencimiento!.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
-      cuit: 20123456789,
-      ptoVta: result.ptoVta,
-      tipoCmp: result.cbteTipo,
-      nroCmp: result.cbteNro,
-      importe: result.importes.total,
-      moneda: "PES",
-      ctz: 1,
-      tipoDocRec: DocTipo.CONSUMIDOR_FINAL,
-      nroDocRec: 0,
-      codAut: Number(result.cae),
-    });
+    // 5. URL del QR oficial para imprimir en la factura (fecha, receptor,
+    //    moneda y CAE salen del resultado; el CUIT, de la instancia).
+    const qrUrl = arca.urlQR(result);
     console.log(`  QR: ${qrUrl}`);
   } else {
     console.error("Factura rechazada:");

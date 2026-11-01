@@ -1,11 +1,10 @@
-import { afipSoapCall as unqualifiedSoapCall } from "@ramiidv/arca-common";
-import type { CallOptions } from "@ramiidv/arca-common";
+import { afipSoapCall as unqualifiedSoapCall, ensureArray as toArray } from "@ramiidv/arca-common";
+import type { CallOptions, LegacyTlsMode } from "@ramiidv/arca-common";
 import {
   ENDPOINTS,
   PADRON_A5_NAMESPACE,
   PADRON_A13_NAMESPACE,
 } from "./constants.js";
-import { toArray } from "./soap-client.js";
 import type { WsfeAuth, Contribuyente, ArcaEvent } from "./types.js";
 
 type R = Record<string, any>;
@@ -76,11 +75,14 @@ export function parsePersonaA5(result: R): Contribuyente {
  */
 export class PadronClient {
   private production: boolean;
+  private endpoints: { padronA5?: string; padronA13?: string };
   private soapOpts: {
     timeout?: number;
     retries?: number;
     retryDelayMs?: number;
     onEvent?: (event: ArcaEvent) => void;
+    fetch?: typeof fetch;
+    legacyTls?: LegacyTlsMode;
   };
 
   constructor(
@@ -90,14 +92,20 @@ export class PadronClient {
       retries?: number;
       retryDelayMs?: number;
       onEvent?: (event: ArcaEvent) => void;
+      fetch?: typeof fetch;
+      legacyTls?: LegacyTlsMode;
+      endpoints?: { padronA5?: string; padronA13?: string };
     } = {}
   ) {
     this.production = production;
+    this.endpoints = opts.endpoints ?? {};
     this.soapOpts = {
       timeout: opts.timeoutMs,
       retries: opts.retries,
       retryDelayMs: opts.retryDelayMs,
       onEvent: opts.onEvent,
+      fetch: opts.fetch,
+      legacyTls: opts.legacyTls,
     };
   }
 
@@ -139,9 +147,8 @@ export class PadronClient {
     cuit: number,
     opts?: CallOptions
   ): Promise<Contribuyente> {
-    const endpoint = this.production
-      ? ENDPOINTS.padronA13.production
-      : ENDPOINTS.padronA13.testing;
+    const endpoint = this.endpoints.padronA13 ??
+      (this.production ? ENDPOINTS.padronA13.production : ENDPOINTS.padronA13.testing);
     const result = await this.getPersona(endpoint, PADRON_A13_NAMESPACE, "getPersona", auth, cuit, opts);
     return parsePersonaA13(result);
   }
@@ -156,9 +163,8 @@ export class PadronClient {
     cuit: number,
     opts?: CallOptions
   ): Promise<Contribuyente> {
-    const endpoint = this.production
-      ? ENDPOINTS.padronA5.production
-      : ENDPOINTS.padronA5.testing;
+    const endpoint = this.endpoints.padronA5 ??
+      (this.production ? ENDPOINTS.padronA5.production : ENDPOINTS.padronA5.testing);
     const result = await this.getPersona(endpoint, PADRON_A5_NAMESPACE, "getPersona_v2", auth, cuit, opts);
     return parsePersonaA5(result);
   }

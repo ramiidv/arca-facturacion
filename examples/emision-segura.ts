@@ -12,6 +12,7 @@
  */
 
 import fs from "fs";
+import { formatDate } from "@ramiidv/arca-common";
 import {
   Arca,
   ArcaResultadoIncierto,
@@ -24,7 +25,7 @@ import {
 import type { FacturarOpts, IntentoComprobante } from "@ramiidv/arca-facturacion";
 
 const arca = new Arca({
-  cuit: 20123456789,
+  cuit: 20123456786,
   cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
   key: fs.readFileSync("./certs/clave.key", "utf-8"),
   production: false,
@@ -98,7 +99,7 @@ async function main() {
     cbteTipo,
     cbteNro,
     // Fijar la fecha: así el intento guardado y lo que se envía coinciden aunque pase la medianoche.
-    fecha: Arca.formatDate(arca.wsaa.now()),
+    fecha: formatDate(arca.wsaa.now()),
     items: [
       { total: 4500, iva: IvaTipo.IVA_21 }, // precios finales, IVA incluido
       { total: 1800.5, iva: IvaTipo.IVA_21 },

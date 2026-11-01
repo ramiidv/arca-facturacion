@@ -36,9 +36,21 @@ export enum TipoExpo {
 export const WSFE_ERRORES_INTERNOS: readonly number[] = [500, 501, 502];
 
 /**
- * Validación 10016 de WSFEv1: el número de comprobante no es el próximo a
- * autorizar. Después de un resultado incierto suele indicar que el intento
- * original sí se autorizó.
+ * Código de error interno de infraestructura de WSFEX (manual WSFEX 3.1.1,
+ * "Errores de infraestructura"): 500 aplicación, 501 base de datos, 502/505
+ * autorizador - transacción activa. No garantizan que el comprobante no se
+ * haya procesado.
+ */
+export const WSFEX_ERRORES_INTERNOS: readonly number[] = [500, 501, 502, 505];
+
+/**
+ * Validación 10016 de WSFEv1. El manual la usa para dos rechazos distintos:
+ * - `<CbteDesde>` no es el próximo a autorizar (último + 1). Después de un
+ *   resultado incierto suele indicar que el intento original sí se autorizó.
+ * - `<CbteFch>` fuera de rango (N±5 / N±10 días, anterior al último emitido).
+ *   No tiene nada que recuperar: hay que corregir la fecha.
+ *
+ * `requiereRecuperacion` distingue los dos casos por el mensaje.
  */
 export const WSFE_NUMERO_NO_CORRESPONDE = 10016;
 
@@ -56,7 +68,11 @@ export const WSFEX_NAMESPACE = "http://ar.gov.afip.dif.fexv1/";
 export const PADRON_A5_NAMESPACE = "http://a5.soap.ws.server.puc.sr/";
 export const PADRON_A13_NAMESPACE = "http://a13.soap.ws.server.puc.sr/";
 
-export const QR_URL = "https://www.afip.gob.ar/fe/qr/";
+/**
+ * URL base del QR de los comprobantes, según la especificación vigente de ARCA
+ * ("Especificaciones del QR incluido en las facturas electrónicas").
+ */
+export const QR_URL = "https://www.arca.gob.ar/fe/qr/";
 
 // ============================================================
 // Tipos de Comprobante
@@ -141,20 +157,9 @@ export enum Concepto {
 // Tipos de Documento
 // ============================================================
 
-export enum DocTipo {
-  CUIT = 80,
-  CUIL = 86,
-  CDI = 87,
-  LE = 89,
-  LC = 90,
-  CI_EXTRANJERA = 91,
-  EN_TRAMITE = 92,
-  ACTA_NACIMIENTO = 93,
-  PASAPORTE = 94,
-  CI_BS_AS_RNP = 95,
-  DNI = 96,
-  CONSUMIDOR_FINAL = 99,
-}
+// Definido en @ramiidv/arca-common (tabla oficial completa, incluye las cédulas
+// provinciales y el código 99 como CONSUMIDOR_FINAL / SIN_IDENTIFICAR).
+export { DocTipo } from "@ramiidv/arca-common";
 
 // ============================================================
 // Condición de IVA del receptor
@@ -211,6 +216,11 @@ export enum Moneda {
 // Mapeos de CbteTipo: Factura → Nota Crédito / Nota Débito
 // ============================================================
 
+/**
+ * Factura → Nota de Crédito del mismo tipo. Incluye la clase E (exportación)
+ * como referencia, pero esas notas se emiten por WSFEX (`facturarExpo`), no
+ * con `notaCredito`.
+ */
 export const NOTA_CREDITO_MAP: Record<number, number> = {
   [CbteTipo.FACTURA_A]: CbteTipo.NOTA_CREDITO_A,
   [CbteTipo.FACTURA_B]: CbteTipo.NOTA_CREDITO_B,
@@ -222,6 +232,7 @@ export const NOTA_CREDITO_MAP: Record<number, number> = {
   [CbteTipo.FCE_FACTURA_C]: CbteTipo.FCE_NOTA_CREDITO_C,
 };
 
+/** Factura → Nota de Débito del mismo tipo (la clase E se emite por WSFEX, ver `NOTA_CREDITO_MAP`). */
 export const NOTA_DEBITO_MAP: Record<number, number> = {
   [CbteTipo.FACTURA_A]: CbteTipo.NOTA_DEBITO_A,
   [CbteTipo.FACTURA_B]: CbteTipo.NOTA_DEBITO_B,
@@ -246,6 +257,44 @@ const TIPOS_C = new Set([
 
 export function isTipoC(cbteTipo: number): boolean {
   return TIPOS_C.has(cbteTipo);
+}
+
+/** Comprobantes de exportación (clase E): se emiten por WSFEX, no por WSFEv1. */
+const TIPOS_E = new Set<number>([CbteTipo.FACTURA_E, CbteTipo.NOTA_DEBITO_E, CbteTipo.NOTA_CREDITO_E]);
+
+export function isTipoE(cbteTipo: number): boolean {
+  return TIPOS_E.has(cbteTipo);
+}
+
+/** Comprobantes clase A (incluida FCE A): el receptor debe ser RI o monotributista. */
+const TIPOS_A = new Set<number>([
+  CbteTipo.FACTURA_A,
+  CbteTipo.NOTA_DEBITO_A,
+  CbteTipo.NOTA_CREDITO_A,
+  CbteTipo.RECIBO_A,
+  CbteTipo.NOTA_VENTA_CONTADO_A,
+  CbteTipo.FCE_FACTURA_A,
+  CbteTipo.FCE_NOTA_DEBITO_A,
+  CbteTipo.FCE_NOTA_CREDITO_A,
+]);
+
+export function isTipoA(cbteTipo: number): boolean {
+  return TIPOS_A.has(cbteTipo);
+}
+
+/** Facturas de Crédito Electrónica MiPyME (FCE), cualquier clase. */
+export function isFCE(cbteTipo: number): boolean {
+  return cbteTipo >= 201 && cbteTipo <= 213;
+}
+
+/** Notas de crédito y débito (WSFEv1, incluidas FCE). */
+const NOTAS = new Set<number>([
+  ...Object.values(NOTA_CREDITO_MAP),
+  ...Object.values(NOTA_DEBITO_MAP),
+].filter((t) => !TIPOS_E.has(t)));
+
+export function isNotaCreditoODebito(cbteTipo: number): boolean {
+  return NOTAS.has(cbteTipo);
 }
 
 // ============================================================

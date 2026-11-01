@@ -3,32 +3,38 @@ export {
   ArcaError,
   ArcaAuthError,
   ArcaSoapError,
+  ArcaServiceError,
   ArcaValidationError,
   ArcaTicketVigenteError,
 } from "@ramiidv/arca-common";
-import { ArcaError } from "@ramiidv/arca-common";
-import type { IntentoComprobante } from "./types.js";
+import { ArcaError, ArcaServiceError } from "@ramiidv/arca-common";
+import type { IntentoComprobante, IntentoExpo, WsfexInvoice } from "./types.js";
 
 /**
- * Error de WSFE/WSFEX con códigos de error de ARCA.
+ * Error de WSFE/WSFEX con códigos de error de ARCA. Extiende `ArcaServiceError`
+ * de `@ramiidv/arca-common` (`instanceof ArcaServiceError` también es `true`).
  *
  * En una emisión, este error significa que ARCA **rechazó** el request: no se
- * emitió. Los errores internos de ARCA (500, 501, 502) no llegan como este
- * error sino como `ArcaResultadoIncierto`, porque no garantizan nada.
+ * emitió. Los errores internos de ARCA (WSFEv1: 500, 501, 502; WSFEX: 500,
+ * 501, 502, 505) no llegan como este error sino como resultado incierto,
+ * porque no garantizan nada.
  *
  * Los rechazos de un comprobante puntual (como 10016, "el número no se
  * corresponde con el próximo a autorizar") llegan como `aprobada: false` con
  * observaciones, no como este error: ver `requiereRecuperacion`.
  */
-export class ArcaWSFEError extends ArcaError {
+export class ArcaWSFEError extends ArcaServiceError {
   static override readonly code: string = "ARCA_WSFE_ERROR";
-  public readonly errors: { code: number; msg: string }[];
+  declare public readonly errors: { code: number; msg: string }[];
 
-  constructor(errors: { code: number; msg: string }[]) {
+  /**
+   * @param errors - Errores tal cual los devolvió ARCA.
+   * @param servicio - Servicio que respondió (para el mensaje). Default: `WSFE`.
+   */
+  constructor(errors: { code: number; msg: string }[], servicio: "WSFE" | "WSFEX" = "WSFE") {
     const msg = errors.map((e) => `[${e.code}] ${e.msg}`).join("; ");
-    super(`WSFE Error: ${msg}`);
+    super(`${servicio} Error: ${msg}`, errors);
     this.name = "ArcaWSFEError";
-    this.errors = errors;
   }
 
   /** `true` si ARCA devolvió el código de error indicado. */
@@ -37,7 +43,7 @@ export class ArcaWSFEError extends ArcaError {
   }
 }
 
-/** Operaciones de emisión que pueden terminar con resultado incierto. */
+/** Operaciones de emisión de WSFEv1 que pueden terminar con resultado incierto. */
 export type OperacionEmision = "FECAESolicitar" | "FECAEARegInformativo";
 
 /**
@@ -50,6 +56,7 @@ export type OperacionEmision = "FECAESolicitar" | "FECAEARegInformativo";
  * mismo número) o si hay un conflicto.
  *
  * Si ARCA respondió con errores de negocio, el error es `ArcaWSFEError` (no se emitió).
+ * Para exportación (WSFEX) el error es `ArcaResultadoInciertoExpo`.
  */
 export class ArcaResultadoIncierto extends ArcaError {
   static override readonly code: string = "ARCA_RESULTADO_INCIERTO";
@@ -79,5 +86,52 @@ export class ArcaResultadoIncierto extends ArcaError {
     this.operacion = operacion;
     this.intento = i;
     this.intentos = intentos;
+  }
+}
+
+/**
+ * No se sabe si WSFEX autorizó el comprobante de exportación (`FEXAuthorize`):
+ * timeout, error de red, HTTP 5xx, error interno de ARCA o respuesta sin
+ * `FEXResultAuth`. El SDK no reintenta.
+ *
+ * WSFEX está diseñado para este caso (manual WSFEX, "Manejo transaccional"):
+ * se reenvía **la misma solicitud con el mismo `Id`**. Si ya estaba aprobada,
+ * WSFEX devuelve el CAE original con `Reproceso = "S"` sin duplicar nada.
+ *
+ * - API simplificada: `arca.facturarExpo({ ...mismasOpts, ...error.intento })`
+ *   (fija `id`, `cbteNro` y `fecha`).
+ * - API raw: `arca.crearFacturaExportacion(error.request)`.
+ *
+ * No reenvíes con otro `Id` ni otro número: eso sí podría autorizar otro comprobante.
+ */
+export class ArcaResultadoInciertoExpo extends ArcaError {
+  static override readonly code: string = "ARCA_RESULTADO_INCIERTO_EXPO";
+  /** Siempre `FEXAuthorize`. */
+  public readonly operacion = "FEXAuthorize" as const;
+  /** `Id` del request enviado: reenviar con el mismo `Id`. */
+  public readonly id: number;
+  public readonly cbteTipo: number;
+  public readonly ptoVta: number;
+  public readonly cbteNro: number;
+  /** Datos para reenviar con `facturarExpo({ ...opts, ...error.intento })`. */
+  public readonly intento: IntentoExpo;
+  /** `Cmp` exacto que se envió, para reenviarlo con `crearFacturaExportacion`. */
+  public readonly request: WsfexInvoice;
+
+  constructor(request: WsfexInvoice, options?: { cause?: unknown }) {
+    const causa = options?.cause instanceof Error ? `: ${options.cause.message}` : "";
+    super(
+      `Resultado incierto de FEXAuthorize (Id ${request.Id}) para el comprobante ` +
+        `${request.Cbte_Tipo}-${request.Punto_vta}-${request.Cbte_nro}${causa}. No se reintentó. ` +
+        "Reenviar la misma solicitud con el mismo Id (WSFEX responde Reproceso=\"S\" si ya estaba autorizada).",
+      options
+    );
+    this.name = "ArcaResultadoInciertoExpo";
+    this.id = request.Id;
+    this.cbteTipo = request.Cbte_Tipo;
+    this.ptoVta = request.Punto_vta;
+    this.cbteNro = request.Cbte_nro;
+    this.intento = { id: request.Id, cbteNro: request.Cbte_nro, fecha: request.Fecha_cbte };
+    this.request = request;
   }
 }

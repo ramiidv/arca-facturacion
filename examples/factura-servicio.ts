@@ -10,7 +10,7 @@ import { Arca, CbteTipo, CondicionIva, DocTipo, IvaTipo } from "@ramiidv/arca-fa
 
 async function main() {
   const arca = new Arca({
-    cuit: 20123456789,
+    cuit: 20123456786,
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false,
@@ -20,7 +20,7 @@ async function main() {
     ptoVta: 1,
     cbteTipo: CbteTipo.FACTURA_A,
     docTipo: DocTipo.CUIT,
-    docNro: 30712345678,
+    docNro: 30712345671,
     condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
     items: [
       { neto: 50000, iva: IvaTipo.IVA_21 },

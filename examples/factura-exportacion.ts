@@ -3,20 +3,25 @@
  *
  * Usa facturarExpo() que obtiene automáticamente el ID de request
  * y el número de comprobante, y calcula el total por item.
+ *
+ * Si la respuesta se pierde (ArcaResultadoInciertoExpo), WSFEX permite
+ * reenviar la misma solicitud con el mismo Id: si ya estaba autorizada,
+ * devuelve el CAE original con reproceso = true, sin duplicar.
  */
 
 import fs from "fs";
-import { Arca, CbteTipo } from "@ramiidv/arca-facturacion";
+import { Arca, ArcaResultadoInciertoExpo, CbteTipo } from "@ramiidv/arca-facturacion";
+import type { FacturarExpoOpts } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({
-    cuit: 20123456789,
+    cuit: 20123456786,
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false,
   });
 
-  const result = await arca.facturarExpo({
+  const opts: FacturarExpoOpts = {
     ptoVta: 1,
     cbteTipo: CbteTipo.FACTURA_E,
     tipoExpo: 1, // 1=Bienes, 2=Servicios, 4=Otros
@@ -51,7 +56,17 @@ async function main() {
         // total: 50 * 25 - 50 = 1200
       },
     ],
-  });
+  };
+
+  let result;
+  try {
+    result = await arca.facturarExpo(opts);
+  } catch (e) {
+    if (!(e instanceof ArcaResultadoInciertoExpo)) throw e;
+    // Persistí e.intento antes de reintentar. Reenviar con el mismo Id, número y fecha:
+    result = await arca.facturarExpo({ ...opts, ...e.intento });
+    if (result.reproceso) console.log("WSFEX ya la tenía autorizada (reproceso)");
+  }
 
   if (result.aprobada) {
     console.log("Factura de exportación aprobada!");

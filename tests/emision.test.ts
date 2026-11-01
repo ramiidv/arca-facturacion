@@ -233,7 +233,12 @@ describe("CAEA", () => {
           "<CAEA>36123456789012</CAEA></FECAEADetResponse></FeDetResp>"
       ),
     });
-    const res = await arca.registrarFacturaCAEA("36123456789012", { ...B, ptoVta: 5, cbteNro: 10 });
+    const res = await arca.registrarFacturaCAEA("36123456789012", {
+      ...B,
+      ptoVta: 5,
+      cbteNro: 10,
+      fechaHoraGeneracion: "20261030101500",
+    });
     expect(res.aprobada).toBe(true);
     expect(res.cae).toBe("36123456789012");
     expect(res.caeVencimiento).toBeUndefined();

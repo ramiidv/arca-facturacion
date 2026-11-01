@@ -12,7 +12,7 @@ import { Arca, CbteTipo, IvaTipo } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({
-    cuit: 20123456789,
+    cuit: 20123456786,
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false,

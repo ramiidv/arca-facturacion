@@ -14,14 +14,14 @@ import { Arca } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({
-    cuit: 20123456789,
+    cuit: 20123456786,
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false,
   });
 
   // Consulta básica (padrón A13)
-  const persona = await arca.consultarCuit(30712345678);
+  const persona = await arca.consultarCuit(30712345671);
 
   console.log("=== Datos del contribuyente ===");
   console.log(`CUIT: ${persona.cuit}`);
@@ -32,7 +32,7 @@ async function main() {
   // Constancia de inscripción (ex padrón A5): domicilio fiscal e impuestos.
   // Requiere que el certificado tenga acceso a ws_sr_constancia_inscripcion
   try {
-    const detalle = await arca.consultarCuitDetalle(30712345678);
+    const detalle = await arca.consultarCuitDetalle(30712345671);
     if (detalle.domicilioFiscal) {
       console.log("\nDomicilio fiscal:");
       console.log(`  ${detalle.domicilioFiscal.direccion}`);

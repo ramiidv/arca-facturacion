@@ -7,7 +7,7 @@ import { Arca, CbteTipo, Moneda } from "@ramiidv/arca-facturacion";
 
 async function main() {
   const arca = new Arca({
-    cuit: 20123456789,
+    cuit: 20123456786,
     cert: fs.readFileSync("./certs/certificado.crt", "utf-8"),
     key: fs.readFileSync("./certs/clave.key", "utf-8"),
     production: false,
@@ -35,7 +35,14 @@ async function main() {
 
   // Cotización del dólar
   const cotizacion = await arca.getCotizacion(Moneda.DOLARES);
-  console.log("Cotización USD:", cotizacion);
+  console.log(`Cotización USD: ${cotizacion.MonCotiz} (${cotizacion.FchCotiz})`);
+
+  // Cotización a una fecha puntual
+  const cotizacionAyer = await arca.getCotizacion(Moneda.DOLARES, { fecha: "20261030" });
+  console.log("Cotización USD al 30/10:", cotizacionAyer.MonCotiz);
+
+  // Actividades del emisor (para informar en Actividades)
+  console.log("Actividades:", await arca.getActividades());
 
   // Condiciones de IVA válidas para el receptor
   const condicionesIva = await arca.getCondicionesIva();

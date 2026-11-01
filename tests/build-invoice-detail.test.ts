@@ -37,7 +37,7 @@ describe("buildInvoiceDetail", () => {
         ptoVta: 1,
         cbteTipo: CbteTipo.FACTURA_A,
         docTipo: DocTipo.CUIT,
-        docNro: 30712345678,
+        docNro: 30712345671,
         condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
         items: [{ neto: 1000, iva: IvaTipo.IVA_21 }],
         servicio: {

@@ -1,5 +1,83 @@
 # Changelog
 
+## 4.0.0 (2026-11-01)
+
+Correcciones contra el WSDL de WSFEv1/WSFEX, el manual WSFEv1 v4.7, el manual WSFEX 3.1.1 y la
+especificación del QR. Requiere `@ramiidv/arca-common` ^0.4.0.
+
+### Breaking changes
+Cambios de comportamiento que eran bugs (la API pública se mantiene):
+- `getCotizacion` devuelve `ResultGet` (`{ MonId, MonCotiz: number, FchCotiz }`); antes devolvía el
+  wrapper completo y `MonCotiz` quedaba `undefined`.
+- `registrarFacturaCAEA` exige `fechaHoraGeneracion` (`CbteFchHsGen`, obligatorio desde la RG 5782,
+  error 1440) y la fecha del comprobante sale de ahí si no se pasa `fecha` (antes usaba la fecha del
+  informe). `registrarCAEA` (raw) exige `CbteFchHsGen` en cada comprobante.
+- `facturarExpo` / `crearFacturaExportacion`: un resultado incierto lanza `ArcaResultadoInciertoExpo`
+  (antes `ArcaSoapError` con `uncertain: true`, o `aprobada: false` con un número inventado si faltaba
+  `FEXResultAuth`). Los errores internos 500/501/502/505 de WSFEX también son inciertos.
+- `facturarExpo`: `Permiso_existente` va vacío en NC/ND E (antes `"N"`, error 1720) y
+  `permisoExistente` solo se admite en Factura E de bienes; `fechaPago` solo en Factura E (1673).
+- `notaCredito`/`notaDebito` de una Factura E y `facturar` con tipo E lanzan `ArcaValidationError`
+  (WSFEv1 los rechaza: van por WSFEX).
+- Validaciones nuevas antes de enviar: fechas inexistentes (`20261399`), concepto 2/3 sin `servicio`
+  y concepto 1 con `servicio`, `servicio.hasta < desde`, cotización con PES distinta de 1, cotización
+  <= 0, `canMisMonExt: "S"` con PES, CUIT del receptor (docTipo 80/86) y de comprobantes asociados con
+  dígito verificador, clase A con docTipo 99, tributos con importes negativos. El CUIT de la config
+  también se valida.
+- `requiereRecuperacion` devuelve `false` para el 10016 por fecha (`CbteFch` fuera de rango).
+- `Arca.generateQRUrl` usa la URL de la especificación vigente (`https://www.arca.gob.ar/fe/qr/`,
+  configurable con `{ baseUrl }`), envía `fecha` como `YYYY-MM-DD` aunque reciba `YYYYMMDD` y omite
+  `tipoDocRec`/`nroDocRec` si no vienen. Valida CUIT y CAE.
+- `getPuntosVenta` ya no se cachea.
+- Tipos: `InvoiceDetail.MonCotiz` es opcional (no se exige con `CanMisMonExt = "S"`),
+  `WsfexGetCmpResult` tiene los campos del WSDL (`Fecha_cbte_cae`, `Motivos_Obs`; no `Obs` inventado),
+  `WsfexInvoice.Opcionales` es `Opcional[]`, `CaeaSinMovResult` sin campos obligatorios inventados,
+  `DocTipo` es el de `@ramiidv/arca-common` (más códigos, mismos valores).
+
+### Features
+- `ArcaConfig` extiende `ArcaBaseConfig`: `timeout` (`requestTimeoutMs` queda como alias deprecado),
+  `fetch`, `legacyTls` y `loginErrorCooldownMs` se pasan a WSAA y a todas las llamadas SOAP; CUIT como
+  número o string; `endpoints` para usar URLs propias.
+- Producción de WSFEv1/WSFEX en Node >= 17: fallback automático al transporte TLS legacy de
+  arca-common (`legacyTls: "auto"`). Documentado en "Producción y TLS".
+- `facturarExpo`: `id` y `cbteNro` opcionales para reenviar con el mismo `Id`; resultado con `id`,
+  `reproceso`, `fecha` y `eventos`. `ArcaResultadoInciertoExpo` con `id`, `cbteTipo`, `ptoVta`,
+  `cbteNro`, `intento` y `request`.
+- WSFEv1: `consultarSinMovimientoCAEA` (`FECAEASinMovimientoConsultar`), `getActividades`
+  (`FEParamGetActividades`), `getTiposPaises` (`FEParamGetTiposPaises`), `getCotizacion(mon, { fecha })`
+  (`FchCotiz`), `getCondicionesIva({ claseCmp })`. `PeriodoAsoc` (`periodoAsoc`), `Actividades`
+  (`actividades`) y `Compradores` (raw) en el detalle.
+- WSFEX: `getCotizacionExpo` (`FEXGetPARAM_Ctz`), `checkPermisoExpo` (`FEXCheck_Permiso`),
+  `getPuntosVentaExpo` (`FEXGetPARAM_PtoVenta`), `getOpcionalesExpo` (`FEXGetPARAM_Opcionales`),
+  `getActividadesExpo` (`FEXGetPARAM_Actividades`), `getMonedasConCotizacionExpo`
+  (`FEXGetPARAM_MON_CON_COTIZACION`); `opcionales` y `actividades` en `facturarExpo`.
+  `siguienteComprobanteExpo` acepta `CallOptions`.
+- `FacturaResult` expone `eventos` (`Events`), `fecha`, `docTipo`, `docNro`, `moneda`, `cotizacion` y
+  `tipoCodAut`. `CaeaSolicitarResult.eventos`.
+- QR: `arca.urlQR(factura)`, `urlQRDesdeFactura` y `generarUrlQR`; `codAut` acepta el CAE string.
+- `formatFechaHora` (formato `yyyymmddhhmmss` para `CbteFchHsGen`).
+- `ArcaWSFEError` extiende `ArcaServiceError` de arca-common (mismo `code` y campos).
+
+### Fixes
+- El detalle de `FECAESolicitar`/`FECAEARegInformativo` y el `Cmp` de `FEXAuthorize` se serializan en
+  el orden de la secuencia del WSDL (antes `FchServ*`, `CondicionIVAReceptorId`, `Iva`/`Tributos` y
+  `Fecha_cbte` iban fuera de orden).
+- `FECAEASinMovimientoInformar` envía `PtoVta` antes que `CAEA` (orden del WSDL).
+- `getCondicionesIva` leía `CondicionIVAReceptor` y devolvía siempre `[]`; el elemento es `CondicionIvaReceptor`.
+- `getPaisesExpo` llamaba a `FEXGetPARAM_DST_Pais`; la operación es `FEXGetPARAM_DST_pais`.
+- Tributos: `Importe` y `BaseImp` redondeados a 2 decimales, igual que `ImpTrib`.
+- Respuestas sin el campo obligatorio (`CbteNro`, `RegXReq`, `ResultGet` de CAEA/cotización,
+  `Cbte_nro`/`Id` de WSFEX) lanzan error en lugar de devolver `0`/`NaN`/`undefined`.
+- `getMonedas` mantiene los códigos como string (`"060"`).
+
+### Interno
+- Sin `soap-client.ts` propio: WSFEv1 y WSFEX usan `afipSoapCall` de arca-common con
+  `qualified: true` y `soapActionFromMethod: true` (mismo SOAPAction que antes, verificado en tests).
+  Errores de WSFE con `extractServiceErrors`.
+- `toDateString`, `Arca.formatDate`, `Arca.extractCAE` y `Arca.calcularTotales` marcados `@deprecated`.
+- Tests: el mock de `fetch` verifica endpoint, SOAPAction, wrapper y namespace de cada request; tests
+  nuevos de WSFEX, CAEA, cotización, parámetros, cache, serialización y QR.
+
 ## 3.0.0 (2026-10-30)
 
 Objetivo de esta versión: que cada comprobante termine **autorizado o con la certeza de que no se

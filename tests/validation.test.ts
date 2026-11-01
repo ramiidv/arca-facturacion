@@ -61,7 +61,7 @@ describe("validateFacturarOpts", () => {
       validateFacturarOpts({
         ...validOpts,
         docTipo: DocTipo.CUIT,
-        docNro: 30712345678,
+        docNro: 30712345671,
       })
     ).toThrow("condicionIva");
   });
@@ -71,7 +71,7 @@ describe("validateFacturarOpts", () => {
       validateFacturarOpts({
         ...validOpts,
         docTipo: DocTipo.CUIT,
-        docNro: 30712345678,
+        docNro: 30712345671,
         condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
       })
     ).not.toThrow();
@@ -169,5 +169,34 @@ describe("validateInvoiceRequest", () => {
     expect(() =>
       validateInvoiceRequest({ PtoVta: 1, CbteTipo: 6, invoices: [] })
     ).toThrow("invoices");
+  });
+});
+
+describe("validateInvoiceRequest (raw)", () => {
+  const inv = {
+    Concepto: 1, DocTipo: 99, DocNro: 0, CbteDesde: 1, CbteHasta: 1, CbteFch: "20261030",
+    ImpTotal: 121, ImpTotConc: 0, ImpNeto: 100, ImpOpEx: 0, ImpTrib: 0, ImpIVA: 21,
+    MonId: "PES", MonCotiz: 1, CondicionIVAReceptorId: 5,
+  };
+  const req = (extra: Record<string, unknown>) => ({ PtoVta: 1, CbteTipo: 6, invoices: [{ ...inv, ...extra }] });
+
+  it("acepta un detalle válido", () => {
+    expect(() => validateInvoiceRequest(req({}))).not.toThrow();
+  });
+
+  it.each([
+    ["CbteFch inexistente", { CbteFch: "20261399" }, "CbteFch"],
+    ["CbteFch con guiones", { CbteFch: "2026-10-30" }, "CbteFch"],
+    ["FchServDesde inválida", { FchServDesde: "20261132" }, "FchServDesde"],
+    ["PES con MonCotiz 2", { MonCotiz: 2 }, "MonCotiz"],
+    ["DOL sin MonCotiz ni CanMisMonExt S", { MonId: "DOL", MonCotiz: undefined }, "MonCotiz"],
+    ["CanMisMonExt S con PES", { CanMisMonExt: "S" }, "CanMisMonExt"],
+    ["ImpTotal NaN", { ImpTotal: Number.NaN }, "ImpTotal"],
+  ])("rechaza %s", (_, extra, field) => {
+    expect(() => validateInvoiceRequest(req(extra) as never)).toThrow(field);
+  });
+
+  it("DOL con CanMisMonExt S puede omitir MonCotiz", () => {
+    expect(() => validateInvoiceRequest(req({ MonId: "DOL", MonCotiz: undefined, CanMisMonExt: "S" }) as never)).not.toThrow();
   });
 });
